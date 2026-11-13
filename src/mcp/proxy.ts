@@ -14,11 +14,12 @@
  *
  * Any registered tool can be reached this way, not only upstream MCP servers.
  */
-import { destinationOf } from '../actions/envelope.ts';
+import { deriveBinding } from '../actions/envelope.ts';
 import { digest, isObject, type Json, type JsonObject } from '../core/json.ts';
 import type { Principal } from '../core/types.ts';
 import { ShieldError, iso, matchAny, newId } from '../core/util.ts';
 import type { Shield } from '../gateway/shield.ts';
+import { operationSpec } from '../registry/tools.ts';
 import { MCP_PROTOCOL_VERSION } from './client.ts';
 
 const SUPPORTED_VERSIONS = [MCP_PROTOCOL_VERSION, '2025-03-26', '2024-11-05'];
@@ -74,16 +75,9 @@ export async function handleMcpMessage(shield: Shield, p: Principal, toolId: str
 
 async function callTool(shield: Shield, p: Principal, toolId: string, taskId: string, name: string, args: JsonObject): Promise<JsonObject> {
   const tool = await shield.checkDrift(p.tenant_id, toolId);
-  const op = tool && Object.hasOwn(tool.manifest.operations, name) ? tool.manifest.operations[name]! : null;
-
+  const op = operationSpec(tool, name);
   // Resource and destination are derived from the reviewed manifest, the same way the policy will check them.
-  const resourceArg = op?.resource_arg ? args[op.resource_arg] : undefined;
-  const resourceId = typeof resourceArg === 'string' && resourceArg ? resourceArg : `${toolId}/${name}`;
-  let destinationId = tool?.manifest.destination_id ?? toolId;
-  if (op?.destination_arg) {
-    const v = args[op.destination_arg];
-    destinationId = destinationOf(Array.isArray(v) ? (v[0] ?? null) : (v ?? null), op.destination_from ?? 'value') ?? destinationId;
-  }
+  const { resourceId, destinationId } = deriveBinding(tool, op, toolId, name, args);
 
   // The same call repeated while approval is pending must land on the same action, or the approval could never be used.
   const reuseKey = digest({ agent: p.principal_id, task: taskId, tool: toolId, name, args });

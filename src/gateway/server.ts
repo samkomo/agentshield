@@ -16,6 +16,7 @@ import type { Checkpoint } from '../audit/events.ts';
 import type { GrantRequest } from '../identity/grants.ts';
 import { requirePermission } from '../identity/identity.ts';
 import { handleMcpMessage } from '../mcp/proxy.ts';
+import { hookAfter, hookBefore } from './hook.ts';
 import type { SignedBundle } from '../policy/bundle.ts';
 import type { Shield } from './shield.ts';
 
@@ -234,6 +235,13 @@ function routes(shield: Shield): [string, RegExp, Handler][] {
     ['POST', '/v1/vault/reveal', (c) => {
       const b = obj(c.body);
       return { value: shield.revealPlaceholder(c.p, str(b, 'task_id'), str(b, 'scope_ref'), str(b, 'placeholder')) };
+    }],
+
+    // ── host hooks ──
+    ['POST', '/v1/hook/:id/before', (c) => hookBefore(shield, c.p, c.params[0]!, c.body)],
+    ['POST', '/v1/hook/:id/after', (c) => {
+      const e = hookAfter(shield, c.p, c.params[0]!, c.body);
+      return { status: 200, body: e };
     }],
 
     // ── MCP ──

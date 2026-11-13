@@ -27,19 +27,39 @@ npm run demo
 npm test
 ```
 
-`npm run demo` runs the report's twelve security workflows in memory against mock tools and prints what was decided and whether anything reached the tool. `npm test` runs 84 tests, including the adversarial invariant suite.
+`npm run demo` runs the report's twelve security workflows in memory against mock tools and prints what was decided and whether anything reached the tool. `npm test` runs 100 tests, including the adversarial invariant suite.
 
 To run a gateway:
 
 ```bash
-node src/cli.ts init --dir .agentshield --tenant default
+node src/cli.ts up
 ```
+
+The first run creates `~/.agentshield` (override with `--dir` or `$AGENTSHIELD_HOME`): keys, the database, the signed default policy and three credentials (`admin`, `security`, `auditor`) in `bootstrap-credentials.json`, readable only by you. The gateway then listens on `127.0.0.1:8787`; use `--socket PATH` for an owner-only Unix socket instead. `init` and `serve` do the two halves separately.
+
+## Install for a Hermes agent
+
+[Hermes](https://github.com/NousResearch/hermes-agent) lets a plugin see every tool call before and after it runs. The AgentShield plugin uses that to check all of them — built-in tools, MCP servers and other plugins — with no changes to the agent.
+
+With the gateway running, prepare it for the agent:
 
 ```bash
-node src/cli.ts serve --dir .agentshield
+node src/cli.ts connect hermes
 ```
 
-`init` creates keys, the database, the signed default policy and three credentials (`admin`, `security`, `auditor`) in `.agentshield/bootstrap-credentials.json`, readable only by you. The gateway listens on `127.0.0.1:8787`; use `--socket PATH` for an owner-only Unix socket instead.
+Then, where Hermes runs, install and enable the plugin (the command above prints this line with the right paths):
+
+```bash
+mkdir -p ~/.hermes/plugins && cp -R integrations/hermes/agentshield ~/.hermes/plugins/ && hermes plugins enable agentshield
+```
+
+Restart Hermes. Once this repository is on GitHub the second step becomes `hermes plugins install <owner>/<repo>/integrations/hermes/agentshield --enable`.
+
+If Hermes runs under a different account on the same machine, use `connect hermes --user ACCOUNT`: it publishes the plugin where that account can read it and prints the line that hands over the credential.
+
+From then on a blocked call is refused with the reason, a risky one goes to Hermes's own approval prompt, credentials and personal data bound for the internet are replaced in the arguments, and credentials in tool results are removed before the model sees them. Set `AGENTSHIELD_MODE=monitor` in `~/.hermes/.env` to log what would happen without blocking anything.
+
+This is the quick route, and a weaker boundary than routing a tool through the gateway: Hermes still holds the credentials and runs the tools, and the plugin runs inside Hermes. See [Integrating an agent](docs/integration.md#hermes-plugin) for what that means and when to move a tool behind the gateway.
 
 ## Documentation
 
@@ -195,9 +215,10 @@ src/approvals/   digest-bound approvals
 src/audit/       hash-chained events, checkpoints, redaction vault
 src/executor/    HTTP, MCP and in-process adapters; credential broker
 src/mcp/         upstream MCP client, agent-facing MCP proxy
-src/gateway/     the pipeline (shield.ts) and REST server
+src/gateway/     the pipeline (shield.ts), REST server and host-hook interface
 sdk/             Python and TypeScript clients
 tests/           workflows, invariants, end-to-end, detectors, primitives
+integrations/    the Hermes plugin and its tool preset
 examples/        demo and the synthetic organisation it runs against
 docs/            architecture, API, integration, tools, policy, operations, threat model
 ```

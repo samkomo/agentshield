@@ -46,7 +46,7 @@ A tool is anything an agent can act through: a REST API, an MCP server, or an in
 | Field | Required | Meaning |
 |---|---|---|
 | `tool_id` | yes | Letters, digits and `. _ : / -`, up to 128 characters |
-| `kind` | yes | `http`, `mcp` or `function` |
+| `kind` | yes | `http`, `mcp`, `function` or `external` |
 | `owner` | yes | Who answers for this tool |
 | `publisher`, `description` | no | For the reviewer |
 | `destination_id` | yes | Where calls to this tool land, as an entry in the destination catalog |
@@ -70,6 +70,7 @@ A tool is anything an agent can act through: a REST API, an MCP server, or an in
 | `resource_arg` | no | The argument that names the resource. The envelope's `resource_id` must equal it |
 | `destination_arg` | no | The argument that says where data goes. The envelope's `destination_id` must equal what it resolves to |
 | `destination_from` | no | How to read `destination_arg`: `value` (default), `email_domain`, `url_host` |
+| `destination_id` | no | A fixed destination for this operation, in place of the tool's. For a tool whose operations land in different places |
 | `amount_arg`, `currency_arg` | no | Arguments holding the amount (integer minor units) and currency. Default `amount_minor` and `currency` for class `payment` |
 | `http` | for `http` | `{ "method": "GET" \| "POST" \| "PUT" \| "PATCH" \| "DELETE", "path": "/…" }` |
 | `description` | no | For MCP tools this is part of the pin |
@@ -80,7 +81,7 @@ Every destination rule — the grant, the catalog, the label ceiling, approval �
 
 - Set `destination_arg` on every operation where an argument chooses the recipient, beneficiary, channel or URL.
 - When an operation has no `destination_arg`, the only valid `destination_id` is the tool's own `destination_id`.
-- Set `resource_arg` wherever an argument chooses the record or file, so that resource labels apply to the thing actually touched.
+- Set `resource_arg` wherever an argument chooses the record or file, so that resource labels apply to the thing actually touched. If a call omits that argument there is nothing to check the envelope against.
 - If `destination_arg` is a list, every entry must resolve to the same destination. Send one action per destination.
 
 Personal data in these two arguments is not redacted (a recipient address is personal data by construction). Credentials found there still block.
@@ -142,6 +143,16 @@ shield.functions.register('notes', async (operation, args, action) => {
 ```
 
 The manifest needs no `endpoint`. Not available when running `agentshield serve`.
+
+### `external`
+
+A tool the calling runtime executes itself, checked through the [host hooks](api.md#host-hooks). The gateway decides and records; it makes no call and holds no credential, so there is no `endpoint` or `credential_ref`.
+
+- `authorize` answers with `"execution": "host"` and no permit. The action is in flight from that moment until the runtime reports its outcome.
+- One operation may be named `*`. It applies to any operation not listed by name, because a runtime can gain tools its manifest has never seen. Give it the strictest class that fits.
+- `input_schema` is optional and its absence is not warned about; the runtime owns its tools' schemas.
+
+The Hermes preset in [integrations/hermes/preset.json](../integrations/hermes/preset.json) is the worked example. `agentshield connect hermes` registers and approves it.
 
 ## Registering and verifying
 

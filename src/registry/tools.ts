@@ -26,7 +26,7 @@ export function validateManifest(m: unknown): ToolManifest {
   if (!isObject(m as Json)) invalid('not an object');
   const t = m as unknown as ToolManifest;
   if (typeof t.tool_id !== 'string' || !NAME.test(t.tool_id)) invalid('tool_id');
-  if (!['http', 'mcp', 'function'].includes(t.kind)) invalid('kind must be http, mcp or function');
+  if (!['http', 'mcp', 'function', 'external'].includes(t.kind)) invalid('kind must be http, mcp, function or external');
   if (typeof t.owner !== 'string' || !t.owner) invalid('owner is required');
   if (typeof t.destination_id !== 'string' || !t.destination_id) invalid('destination_id is required');
   if (t.credential_ref !== undefined && !/^(env:[A-Za-z_][A-Za-z0-9_]*|file:\/.+)$/.test(t.credential_ref)) invalid('credential_ref must be env:NAME or file:/absolute/path');
@@ -54,12 +54,14 @@ export function validateManifest(m: unknown): ToolManifest {
   }
   if (!isObject(t.operations as unknown as Json) || !Object.keys(t.operations).length) invalid('at least one operation is required');
   for (const [name, op] of Object.entries(t.operations)) {
-    if (!NAME.test(name)) invalid(`operation name "${name}"`);
+    // `*` is a catch-all for host-executed tools, whose runtime can gain tools the manifest has never seen.
+    if (!(name === '*' && t.kind === 'external') && !NAME.test(name)) invalid(`operation name "${name}"`);
     const o = op as OperationSpec;
     if (!isObject(o as unknown as Json)) invalid(`operation ${name}`);
     if (typeof o.class !== 'string' || !o.class) invalid(`operation ${name}: class is required`);
     if (o.effect !== 'read' && o.effect !== 'write') invalid(`operation ${name}: effect must be read or write`);
     if (o.approval !== undefined && o.approval !== 'always') invalid(`operation ${name}: approval may only be "always"`);
+    if (o.destination_id !== undefined && (typeof o.destination_id !== 'string' || !o.destination_id)) invalid(`operation ${name}: destination_id`);
     if (o.destination_from !== undefined && !['value', 'email_domain', 'url_host'].includes(o.destination_from)) invalid(`operation ${name}: destination_from`);
     for (const k of ['input_schema', 'output_schema'] as const) {
       if (o[k] !== undefined && !isObject(o[k] as Json)) invalid(`operation ${name}: ${k} must be an object`);
@@ -72,6 +74,14 @@ export function validateManifest(m: unknown): ToolManifest {
   return t;
 }
 
+/** The reviewed spec for an operation. Host-executed tools may declare `*` for operations not listed by name. */
+export function operationSpec(tool: ToolRecord | null | undefined, operation: string): OperationSpec | null {
+  if (!tool) return null;
+  const ops = tool.manifest.operations;
+  if (operation !== '*' && Object.hasOwn(ops, operation)) return ops[operation]!;
+  return tool.manifest.kind === 'external' && Object.hasOwn(ops, '*') ? ops['*']! : null;
+}
+
 /** Schema keywords the validator does not enforce, per operation. Shown to the reviewer at registration. */
 export function manifestWarnings(m: ToolManifest): string[] {
   const out: string[] = [];
@@ -80,7 +90,7 @@ export function manifestWarnings(m: ToolManifest): string[] {
       const schema = op[k];
       if (schema) for (const path of unsupportedKeywords(schema)) out.push(`${name}.${k}${path} is not enforced`);
     }
-    if (!op.input_schema) out.push(`${name} has no input_schema; arguments are unconstrained`);
+    if (!op.input_schema && m.kind !== 'external') out.push(`${name} has no input_schema; arguments are unconstrained`);
   }
   return out;
 }

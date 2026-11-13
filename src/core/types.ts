@@ -111,6 +111,8 @@ export interface OperationSpec {
    * to. When absent, the only valid destination is the tool's own.
    */
   destination_arg?: string;
+  /** A fixed destination for this operation, overriding the tool's. Used when one tool's operations land in different places. */
+  destination_id?: string;
   /** How to read destination_arg: as-is, the domain of an email address, or the host of a URL. */
   destination_from?: 'value' | 'email_domain' | 'url_host';
   http?: { method: string; path: string };
@@ -118,7 +120,12 @@ export interface OperationSpec {
 
 export interface ToolManifest {
   tool_id: string;
-  kind: 'http' | 'mcp' | 'function';
+  /**
+   * `external` tools are executed by the host that asked (an agent framework's
+   * own tool runner, via a hook). The gateway decides and records; it does not
+   * make the call and holds no credential for it.
+   */
+  kind: 'http' | 'mcp' | 'function' | 'external';
   owner: string;
   publisher?: string;
   description?: string;
@@ -234,6 +241,8 @@ export interface DecisionResponse {
   permit: string | null;
   approval_id: string | null;
   obligations: string[];
+  /** `host` when the tool is executed by the caller's own runtime: there is no permit, and the caller reports the outcome. */
+  execution?: 'host';
   /** Present when arguments were rewritten: this, not the submitted action, is what the permit covers. */
   transformed_action?: ActionEnvelope;
 }

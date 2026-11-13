@@ -99,6 +99,7 @@ Response (`200` for `allow` and `redact`, `202` for `require_approval`, `403` fo
 ```
 
 - `permit` is set only for `allow` and `redact`. `expires_at` is then the permit's expiry (60 seconds by default).
+- For a tool of kind `external` the response has `"execution": "host"` and no permit: the caller runs the tool itself and reports back through the [host hooks](#host-hooks).
 - For `require_approval`, `approval_id` is set and `expires_at` is when the approval request lapses.
 - For `redact`, `transformed_action` holds the rewritten envelope. **That** is what the permit covers and what must be presented to `execute`.
 - `reasons` lists every rule that applied. Codes are stable; see [Decision reason codes](#decision-reason-codes).
@@ -162,6 +163,7 @@ Errors before execution starts: `403 permit_invalid`, `403 permit_expired`, `409
 | `downstream_rejected` | failed | A REST tool answered `4xx` |
 | `downstream_error`, `upstream_error`, `tool_reported_error` | unknown for a write, failed for a read | The tool received the call and answered with an error, or did not answer |
 | `execution_error` | unknown for a write, failed for a read | Any other failure during the call |
+| `not_executed` | failed or denied | A host-executed tool was reported as never having run |
 | `invalid_response`, `result_too_large` | unchanged | The result was withheld; the action's state stands |
 
 ### `POST /v1/actions/run` — `agent:execute`
@@ -402,7 +404,7 @@ Suspension takes effect on new decisions and on permits already issued. Resuming
 
 Returns `{ items, next_cursor }` in sequence order. Pass `next_cursor` as `after` for the next page. `agent_id` is matched through its pseudonym. `GET /v1/events/{id}` returns one event. The event format is in [architecture.md](architecture.md#audit).
 
-Event types: `permit.issued`, `decision.blocked`, `decision.approval_required`, `approval.approved`, `approval.rejected`, `execution.succeeded`, `execution.failed`, `execution.unknown`, `execution.denied`, `execution.reconciled`, `action.blocked`, `scan.input_flagged`, `tool.registered`, `tool.verified`, `tool.quarantined`, `policy.created`, `policy.activated`, `policy.rolled_back`, `policy.revoked`, `grant.created`, `grant.delegated`, `grant.revoked`, `delegation.denied`, `agent.suspended`, `agent.resumed`, `principal.created`, `vault.reveal`.
+Event types: `permit.issued`, `decision.allowed` (host-executed tools), `decision.blocked`, `decision.approval_required`, `approval.approved`, `approval.rejected`, `approval.host_approved`, `execution.succeeded`, `execution.failed`, `execution.unknown`, `execution.denied`, `execution.reconciled`, `action.blocked`, `scan.input_flagged`, `tool.registered`, `tool.verified`, `tool.quarantined`, `policy.created`, `policy.activated`, `policy.rolled_back`, `policy.revoked`, `grant.created`, `grant.delegated`, `grant.revoked`, `delegation.denied`, `agent.suspended`, `agent.resumed`, `principal.created`, `principal.credential_rotated`, `vault.reveal`.
 
 ### `POST /v1/audit/verify` — `auditor:read`
 
@@ -426,11 +428,54 @@ Signs the current head, appends it to the checkpoint sink, and returns it:
 
 ### `POST /v1/reports` — `auditor:report`
 
-Body: `{ "range": { "from": ISO, "to": ISO } }`. Returns a summary (`permits_issued`, `blocked`, `approvals_required`, `approvals_granted`, `approvals_rejected`, `executions`, `executions_unknown`, `tools_quarantined`, `agents_suspended`), per-type event counts, chain integrity, `unresolved_actions`, and the active policy.
+Body: `{ "range": { "from": ISO, "to": ISO } }`. Returns a summary (`permits_issued`, `allowed_host_executed`, `blocked`, `approvals_required`, `approvals_granted`, `approvals_rejected`, `executions`, `executions_unknown`, `tools_quarantined`, `agents_suspended`), per-type event counts, chain integrity, `unresolved_actions`, and the active policy.
 
 ### `POST /v1/vault/reveal` — `vault:reveal`
 
 Body: `{ task_id, scope_ref, placeholder }`, where `scope_ref` is the `action_id` (for a redacted action) or `scan_id` (for `/v1/redact`). Returns `{ value }` and appends a `vault.reveal` event.
+
+## Host hooks
+
+For agent runtimes that expose a hook before and after each tool call. The tool must be registered with kind `external`: the runtime executes it, the gateway decides and records. The [Hermes plugin](integration.md#hermes-plugin) is the client for these two routes.
+
+### `POST /v1/hook/{tool_id}/before` — `agent:execute`
+
+Body: `{ "tool_name": string, "args": object, "task_id"?: string, "dry_run"?: boolean }`. `task_id` is the runtime's session id; it is made safe to use as a task id, and defaults to `default`. The gateway builds the action itself, taking the resource and destination from the reviewed manifest.
+
+```json
+{
+  "action": "modify",
+  "action_id": "act_5f0c…",
+  "decision": "redact",
+  "decision_id": "dec_91ab…",
+  "risk_level": "low",
+  "reason": "Within grant and policy.",
+  "reason_codes": ["within_grant"],
+  "approval_id": null,
+  "finding_categories": ["PII", "SECRET"],
+  "args": { "query": "why is [GITHUB_TOKEN_1] rejected for [EMAIL_1]" }
+}
+```
+
+| `action` | The runtime should |
+|---|---|
+| `allow` | Run the tool |
+| `modify` | Run the tool with `args` in place of the original arguments |
+| `approve` | Ask a person. `args` is present if the arguments were also rewritten |
+| `block` | Not run the tool, and give the model `reason` |
+
+With `dry_run: true` the answer is the same but nothing is recorded and there is no `action_id`.
+
+### `POST /v1/hook/{tool_id}/after` — `agent:execute`
+
+Body: `{ "action_id": string, "status": "ok" | "error" | "blocked", "result"?: any, "host_approved"?: boolean }`.
+
+- `ok` and `error` mean the tool ran; `blocked` means it did not (a person refused, or something else in the runtime stopped it).
+- `host_approved: true` is required to report a run for an action whose `before` answered `approve`. It is recorded as an approval given at the host.
+
+Returns an [execution response](#post-v1actionsexecute--agentexecute) plus `tainted`: `result` is the copy that is safe to show the model, `result_redacted` says whether credentials were removed, and `tainted: true` means the content carries injection signals at or above the policy threshold.
+
+Errors: `404 action_not_found` (not this agent's action, or not this tool), `409 not_host_executed` (the tool is not of kind `external`), `409 approval_required` (awaiting approval and `host_approved` was not set), `409 action_already_decided`.
 
 ## MCP endpoint
 

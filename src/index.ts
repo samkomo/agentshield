@@ -1,6 +1,7 @@
 export { Shield, type ShieldOptions } from './gateway/shield.ts';
 export { createHandler, startServer, type ListenOptions } from './gateway/server.ts';
 export { handleMcpMessage } from './mcp/proxy.ts';
+export { hookAfter, hookBefore } from './gateway/hook.ts';
 export { Store } from './store/db.ts';
 export { ephemeralKeys, generateKeyDir, loadKeyDir, signingKeyFromPem, type KeySet } from './core/crypto.ts';
 export { canonicalize, digest, parseStrict, type Json, type JsonObject } from './core/json.ts';

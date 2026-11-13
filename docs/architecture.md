@@ -61,6 +61,7 @@ If either is false, the agent can go around.
 | Adapters | REST, MCP and in-process execution; credential broker | [src/executor/adapters.ts](../src/executor/adapters.ts) |
 | MCP | Upstream client; agent-facing proxy | [src/mcp/](../src/mcp/) |
 | Pipeline | `authorize`, `execute`, scanning and administration | [src/gateway/shield.ts](../src/gateway/shield.ts) |
+| Host hooks | Decide-and-record for tools the runtime executes | [src/gateway/hook.ts](../src/gateway/hook.ts) |
 | Server | REST routes, MCP endpoint, body limits | [src/gateway/server.ts](../src/gateway/server.ts) |
 
 ## The action
@@ -152,6 +153,16 @@ stateDiagram-v2
 ```
 
 An intent left in `executing` by a crash, or in `unknown`, is listed under `unresolved_actions` in the audit report until an operator reconciles it. It is never retried automatically.
+
+## Host-executed tools
+
+Some runtimes will not hand a tool call to another process, but will let a plugin see it before and after it runs. For those, a tool can be registered with kind `external` and driven through two hook calls ([src/gateway/hook.ts](../src/gateway/hook.ts)).
+
+`before` builds the action from the reviewed manifest and runs the same `authorize` pipeline. The differences come after the decision: there is no permit, because there is nothing for a permit to gate, and an allowed action goes straight to `executing`. `after` carries the runtime's account of what happened and the result, which is checked exactly as a gateway-executed result is; the action is then settled and an `execution.*` event appended with `executed_by: host`. An action that never gets an `after` stays `executing` and shows up as unresolved.
+
+Approval for these tools is given at the host's own prompt and reported with `host_approved`. The gateway records it as such rather than pretending it saw the person.
+
+Everything the gateway learns this way is what the runtime chose to tell it. This mode gives coverage and evidence; it does not give the gateway custody of the credential or the call.
 
 ## Grants and delegation
 

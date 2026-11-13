@@ -1,0 +1,271 @@
+{
+  "description": "Hermes built-in tools, executed by Hermes and checked through the AgentShield plugin.",
+  "destinations": [
+    {
+      "destination_id": "hermes.local",
+      "class": "internal",
+      "state": "approved",
+      "max_label": "CRITICAL",
+      "accepts": [
+        "PII"
+      ]
+    },
+    {
+      "destination_id": "internet",
+      "class": "external",
+      "state": "approved",
+      "max_label": "INTERNAL",
+      "accepts": []
+    },
+    {
+      "destination_id": "connected-services",
+      "class": "external",
+      "state": "approved",
+      "max_label": "CONFIDENTIAL",
+      "accepts": [
+        "PII"
+      ]
+    }
+  ],
+  "grant_scope": {
+    "tools": [
+      "hermes"
+    ],
+    "operations": [
+      "*"
+    ],
+    "resources": [
+      "*"
+    ],
+    "destinations": [
+      "connected-services",
+      "hermes.local",
+      "internet"
+    ]
+  },
+  "tool": {
+    "tool_id": "hermes",
+    "kind": "external",
+    "owner": "agentshield-preset",
+    "publisher": "Nous Research (Hermes Agent)",
+    "description": "Tools Hermes runs itself. AgentShield decides and records; Hermes executes.",
+    "destination_id": "hermes.local",
+    "operations": {
+      "read_file": {
+        "class": "data_read",
+        "effect": "read",
+        "resource_arg": "path"
+      },
+      "search_files": {
+        "class": "data_read",
+        "effect": "read",
+        "resource_arg": "path"
+      },
+      "skills_list": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "skill_view": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "session_search": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "todo_list": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "clarify": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "vision_analyze": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "kanban_show": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "kanban_list": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "kanban_attachments": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "kanban_heartbeat": {
+        "class": "data_read",
+        "effect": "read"
+      },
+      "write_file": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true,
+        "resource_arg": "path"
+      },
+      "patch": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true,
+        "resource_arg": "path"
+      },
+      "memory": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "skill_manage": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "cronjob_manage": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "process_manage": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "delegate_task": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_complete": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_block": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_request_review": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_request_changes": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_comment": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_create": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_link": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_unblock": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_attach": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "kanban_attach_url": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": true
+      },
+      "terminal": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": false
+      },
+      "execute_code": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": false
+      },
+      "computer_use": {
+        "class": "data_write",
+        "effect": "write",
+        "reversible": false
+      },
+      "web_search": {
+        "class": "egress",
+        "effect": "read",
+        "destination_id": "internet"
+      },
+      "web_extract": {
+        "class": "egress",
+        "effect": "read",
+        "destination_id": "internet"
+      },
+      "x_search": {
+        "class": "egress",
+        "effect": "read",
+        "destination_id": "internet"
+      },
+      "browser_exec": {
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "destination_id": "internet"
+      },
+      "browser_cdp": {
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "destination_id": "internet"
+      },
+      "browser_dialog": {
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "destination_id": "internet"
+      },
+      "browser_vault": {
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "privileged": true,
+        "destination_id": "internet"
+      },
+      "image_generate": {
+        "class": "model",
+        "effect": "read",
+        "destination_id": "internet"
+      },
+      "text_to_speech": {
+        "class": "model",
+        "effect": "read",
+        "destination_id": "internet"
+      },
+      "manage_connections": {
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "destination_id": "connected-services"
+      },
+      "*": {
+        "description": "Any tool not listed by name: MCP servers, connectors and other plugins.",
+        "class": "egress",
+        "effect": "write",
+        "reversible": false,
+        "destination_id": "connected-services"
+      }
+    }
+  }
+}

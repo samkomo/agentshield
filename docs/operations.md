@@ -22,12 +22,16 @@ cd agentshield && npm install
 node src/cli.ts init --dir /var/lib/agentshield --tenant default
 ```
 
+Every command takes `--dir`. Without it the data directory is `$AGENTSHIELD_HOME`, or `~/.agentshield`. `agentshield up` runs `init` if the directory is new and then `serve`.
+
 This creates, readable only by the user that ran it:
 
 ```
 /var/lib/agentshield/
   agentshield.db                 state, intents, events
+  config.json                    the tenant this directory was created for
   bootstrap-credentials.json     admin, security (operator) and auditor credentials
+  agents/<id>.token              agent credentials written by `connect` (owner-only)
   keys/
     permit.key  permit.pub       signs / verifies execution permits
     event.key   event.pub        signs / verifies audit events and checkpoints
@@ -116,6 +120,16 @@ A checkpoint is useless for detecting truncation if the attacker can rewrite it 
 - `GET /v1/agents/{id}/risks` for agents with rising denial counts.
 - `GET /v1/tools` — anything `pending` or `quarantined`?
 - Grants close to expiry or broader than their task: `GET /v1/grants`.
+
+### Connect or renew a Hermes agent
+
+```bash
+node src/cli.ts connect hermes --dir /var/lib/agentshield --user oscar
+```
+
+Registers the Hermes tool preset and destinations, creates the agent with a standing grant (90 days; `--days` to change), and prints the lines that hand over the credential and install the plugin. Running it again changes only what is missing, so it is also how you renew an expired grant or pick up a newer preset. `--rotate` issues a new credential and invalidates the old one. See [Integrating an agent](integration.md#hermes-plugin).
+
+When the grant expires every tool call is blocked with `no_active_grant` until it is renewed.
 
 ### Change policy
 
@@ -213,7 +227,7 @@ In both cases: stop the gateway, preserve the database file and checkpoints as t
 
 Known operational gaps, so they are not discovered during an incident:
 
-- No credential rotation route, and no route to disable a non-agent principal.
+- No credential rotation route (`connect hermes --rotate` rotates a Hermes agent's), and no route to disable a non-agent principal.
 - No way to create principals in a second tenant over REST; `init` creates the first tenant's.
 - The checkpoint sink path is fixed when using the CLI.
 - No built-in notification when an approval is waiting.

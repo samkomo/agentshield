@@ -103,8 +103,9 @@ export function bindingErrors(env: ActionEnvelope, tool: ToolRecord | null, op: 
   if (!tool || !op) return [];
   const errors: string[] = [];
   if (op.resource_arg) {
+    // An absent argument names no resource, so there is nothing for the envelope to contradict.
     const v = env.arguments[op.resource_arg];
-    if (v !== env.resource_id) errors.push(`resource_id does not match the "${op.resource_arg}" argument.`);
+    if (v !== undefined && v !== env.resource_id) errors.push(`resource_id does not match the "${op.resource_arg}" argument.`);
   }
   if (op.destination_arg) {
     const v = env.arguments[op.destination_arg];
@@ -114,10 +115,26 @@ export function bindingErrors(env: ActionEnvelope, tool: ToolRecord | null, op: 
     else if (resolved.some((d) => d !== env.destination_id.toLowerCase() && d !== env.destination_id)) {
       errors.push(`destination_id does not match the "${op.destination_arg}" argument; send one action per destination.`);
     }
-  } else if (tool.manifest.destination_id !== env.destination_id) {
+  } else if ((op.destination_id ?? tool.manifest.destination_id) !== env.destination_id) {
     errors.push('destination_id is not where this tool is registered to run.');
   }
   return errors;
+}
+
+/**
+ * Work out an envelope's resource and destination from the reviewed manifest,
+ * for callers (the MCP proxy, host hooks) that only know a tool name and its
+ * arguments. It mirrors `bindingErrors`, so what is derived here always passes there.
+ */
+export function deriveBinding(tool: ToolRecord | null | undefined, op: OperationSpec | null, toolId: string, operation: string, args: JsonObject): { resourceId: string; destinationId: string } {
+  const resourceArg = op?.resource_arg ? args[op.resource_arg] : undefined;
+  const resourceId = typeof resourceArg === 'string' && resourceArg && resourceArg.length <= 512 ? resourceArg : `${toolId}/${operation}`;
+  let destinationId = op?.destination_id ?? tool?.manifest.destination_id ?? toolId;
+  if (op?.destination_arg) {
+    const v = args[op.destination_arg];
+    destinationId = destinationOf(Array.isArray(v) ? (v[0] ?? null) : (v ?? null), op.destination_from ?? 'value') ?? destinationId;
+  }
+  return { resourceId, destinationId };
 }
 
 /** Pull the amount out of the arguments named by the manifest. Amounts are integers in minor units; floats are refused, not rounded. */

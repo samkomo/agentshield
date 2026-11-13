@@ -12,6 +12,15 @@ Every guarantee below depends on these. Where one fails, the guarantee does not 
 4. **The policy signing key is held away from the gateway** and by someone other than whoever activates policy.
 5. **Checkpoints leave the host.** Truncation of the audit chain is detectable only against a checkpoint the attacker could not also rewrite.
 
+## Two strengths of enforcement
+
+A tool can be protected in two ways, and the claims below apply to them differently.
+
+- **Routed** (kinds `http`, `mcp`, `function`): the gateway makes the call with a credential the agent never holds. The claims hold under the assumptions above.
+- **Hooked** (kind `external`, for example the Hermes plugin): the runtime makes the call and asks the gateway first. Assumption 1 does not hold — the agent has the credential and the path — so the claims hold only while the runtime keeps obeying its plugin. A compromise of the agent's account can switch the plugin off. What remains true is that every decision the gateway was asked for, and every outcome it was told, is in the signed record.
+
+Hooked coverage is broad and immediate; routed coverage is strong. Use the first for everything and the second for what matters most.
+
 ## What is claimed
 
 Under those assumptions:
@@ -76,6 +85,8 @@ The report lists tests a release should pass (chapter 11, "Validation and recove
 | Unknown outcome on a payment | Yes | `invariants`: *a write with an unknown outcome is never retried…* |
 | Audit edits, gaps, reordering, truncation | Yes | `invariants`: the two audit-chain tests |
 | MCP definition drift (rug pull) | Yes | `http`: *MCP proxy: … quarantine on drift* |
+| Host-hook decisions, result redaction, taint, fail-closed when the gateway is down | Yes, including through Hermes's own plugin loader and dispatcher when Hermes is installed | `hook`: *Hermes plugin loaded and dispatched by Hermes itself* |
+| A caller closing out a gateway-executed action by claiming it ran | Yes | `hook`: *outcomes are only accepted from the agent that asked…* |
 | Encoded payloads | One level of base64, fullwidth and zero-width obfuscation | `detect`: *obfuscation…* |
 | Destination spoofing in the envelope | Yes | `invariants`: *the envelope cannot name one destination…* |
 | Cross-tenant access | Yes | `invariants`: *tenants are isolated* |

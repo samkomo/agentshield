@@ -1,15 +1,101 @@
 # Integrating an agent
 
-There are four ways to put an agent behind AgentShield. They can be mixed.
+There are five ways to put an agent behind AgentShield. They can be mixed.
 
 | Route | Use it when |
 |---|---|
+| [Hermes plugin](#hermes-plugin) | The agent runs on Hermes. One line, covers every tool, no code changes. A checkpoint rather than a wall |
 | [SDK](#sdks) (Python or TypeScript) | You control the agent's tool dispatcher and can replace direct tool calls |
 | [MCP](#mcp) | The agent already speaks MCP; point it at the gateway instead of the real server |
 | [REST](#rest) | Any other language; the API is small |
 | [In-process](#in-process) | The gateway and the tools live in one Node application, or in tests |
 
 Whichever you choose, read [Closing the bypass](#closing-the-bypass) first. Integration is not protection until the agent has no other way to reach the tool.
+
+## Hermes plugin
+
+Hermes calls plugin hooks before and after every tool call. The plugin in [integrations/hermes/agentshield](../integrations/hermes/agentshield/__init__.py) uses them to ask the gateway about each call and to hand back what the gateway decides.
+
+### Install
+
+On the account that runs the gateway:
+
+```bash
+node src/cli.ts up
+```
+
+```bash
+node src/cli.ts connect hermes
+```
+
+`connect hermes` registers the destinations and the tool preset, creates an agent identity with a 90-day standing grant, saves its credential, and prints the install line. It is safe to run again: it changes only what is missing, and keeps a working credential unless you pass `--rotate`. Run it again to renew the grant when it expires.
+
+Where Hermes runs:
+
+```bash
+mkdir -p ~/.hermes/plugins && cp -R integrations/hermes/agentshield ~/.hermes/plugins/ && hermes plugins enable agentshield
+```
+
+Restart Hermes. From a GitHub checkout of this repository the same thing is `hermes plugins install <owner>/<repo>/integrations/hermes/agentshield --enable`.
+
+**A different account for the agent.** `connect hermes --user oscar` copies the plugin to a folder that account can read (`/Users/Shared/agentshield` on macOS; `--share-dir` elsewhere) and prints two lines: one that writes the credential into that account's `~/.config/agentshield/token` without displaying it, and the install line to run there. Running the gateway and the agent as different accounts is the better arrangement: the agent cannot read the gateway's keys or database.
+
+### What happens to a tool call
+
+| Gateway decision | What Hermes does |
+|---|---|
+| allow | Runs the tool |
+| redact | Runs the tool with the rewritten arguments (placeholders in place of credentials and personal data) |
+| require approval | Shows its own approval prompt. Yes runs the tool; no, or no answer, blocks it. Each prompt is keyed to one call, so "always allow" does not carry over |
+| block | Does not run the tool; the model is told why, and that retrying with altered arguments will not help |
+
+After the tool runs, the plugin sends the result to the gateway. Credentials in it are replaced before the model sees it. A result carrying injection signals gets a one-line notice in front saying it is data, and marks the session: later writes in that session go to the approval prompt.
+
+If the gateway cannot be reached, or there is no credential, tool calls are blocked.
+
+### The preset
+
+[integrations/hermes/preset.json](../integrations/hermes/preset.json) classifies Hermes's built-in tools and sets up three destinations:
+
+| Destination | Tools | Receives |
+|---|---|---|
+| `hermes.local` | Files, terminal, code execution, memory, skills, kanban, scheduling | Anything, including personal data. Credentials in arguments block the call |
+| `internet` | Web search and extraction, browser, image and speech generation | Nothing above `INTERNAL`. Personal data and credentials are replaced |
+| `connected-services` | Everything not listed by name: MCP servers, connectors, other plugins | Up to `CONFIDENTIAL`, and personal data (these are your own accounts). Credentials are replaced |
+
+Tools Hermes gains later fall under the catch-all, which treats them as sending data out. To give one its own rules, add it to the preset by name and run `connect hermes` again.
+
+Two things to expect on day one: a shell command or file write containing something credential-shaped is refused, and anything the session read from the web that looks like instructions makes later writes ask first.
+
+### Settings
+
+Environment variables, read on every call; `~/.hermes/.env` is a good place for them.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENTSHIELD_URL` | `http://127.0.0.1:8787` | Where the gateway is |
+| `AGENTSHIELD_TOKEN` | — | The agent credential. If unset, read from the token file |
+| `AGENTSHIELD_TOKEN_FILE` | `~/.config/agentshield/token` | Where the credential is kept |
+| `AGENTSHIELD_MODE` | `enforce` | `monitor` blocks and changes nothing, records nothing in the gateway, and logs what would have happened |
+| `AGENTSHIELD_FAIL_OPEN` | `0` | `1` lets tool calls through when the gateway cannot be reached. Not recommended |
+| `AGENTSHIELD_TIMEOUT` | `10` | Seconds to wait for the gateway |
+
+Start in `monitor`, read the log for a day, then remove the setting.
+
+### What this route is, and is not
+
+The plugin is a checkpoint the runtime agrees to obey. Compared with routing a tool through the gateway:
+
+| | Plugin | Routed through the gateway |
+|---|---|---|
+| Who runs the tool | Hermes | The gateway |
+| Who holds the tool's credential | Hermes | The gateway only |
+| Coverage | Every tool Hermes has, immediately | Each tool you register |
+| Approval | Hermes's prompt; trusted as far as Hermes is | A separate approver credential, bound to the exact action |
+| If the agent's account is compromised | The plugin can be disabled or its settings changed | The agent still cannot reach the tool without the gateway |
+| Evidence | Signed record of each decision and of what Hermes reported | Signed record of what the gateway itself did |
+
+Use the plugin for coverage, and move the few tools whose misuse would be costly — payments, outbound mail and messaging, anything irreversible — behind the gateway with the routes below, keeping their credentials out of the agent's account. Model calls are not covered by either: the plugin sees tool calls, not what is sent to the model provider.
 
 ## What the agent must supply
 

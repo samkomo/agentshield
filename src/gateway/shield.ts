@@ -18,7 +18,7 @@
  */
 import { performance } from 'node:perf_hooks';
 import { actionDigest, bind, bindingErrors, extractAmount, requestDigest, toEnvelope, validateEnvelope } from '../actions/envelope.ts';
-import { Intents, type Intent } from '../actions/intents.ts';
+import { Intents, type Intent, type IntentState } from '../actions/intents.ts';
 import { issuePermit, verifyPermit, type PermitClaims } from '../actions/permit.ts';
 import { Approvals, type Approval } from '../approvals/approvals.ts';
 import { AuditLog, type Checkpoint, type EventInput, type StoredEvent } from '../audit/events.ts';
@@ -42,7 +42,7 @@ import { DEFAULT_POLICY, PolicyStore, type PolicyBundle, type PolicyRecord, type
 import { decide, type PolicyOutcome } from '../policy/engine.ts';
 import { ceilingRank, highestLabel, labelRank, scoreRisk } from '../policy/risk.ts';
 import { Catalog } from '../registry/catalog.ts';
-import { ToolRegistry, pinnedFingerprint, upstreamFingerprint } from '../registry/tools.ts';
+import { ToolRegistry, operationSpec, pinnedFingerprint, upstreamFingerprint } from '../registry/tools.ts';
 import { Store, isUniqueViolation } from '../store/db.ts';
 
 export interface ShieldOptions {
@@ -159,7 +159,7 @@ export class Shield {
     const grant = this.grants.resolve(tenant, p.principal_id, submitted.task_id);
     const chain = grant ? this.grants.chain(grant) : [];
     const tool = this.tools.get(tenant, submitted.tool_id) ?? null;
-    const op = tool && Object.hasOwn(tool.manifest.operations, submitted.operation) ? tool.manifest.operations[submitted.operation]! : null;
+    const op = operationSpec(tool, submitted.operation);
     const destination = this.catalog.destination(tenant, submitted.destination_id);
     const task = this.catalog.task(tenant, submitted.task_id);
     const resourceLabels = this.catalog.labelsFor(tenant, submitted.resource_id);
@@ -362,6 +362,14 @@ export class Shield {
         if (ev.replacements.length) {
           this.vault.put(tenant, env.task_id, env.action_id, ev.replacements, ev.policy.limits.max_action_ttl_seconds * 1000);
         }
+        if (ev.tool!.manifest.kind === 'external') {
+          // The host runs this tool itself, straight after it hears "yes". There is nothing for a permit to
+          // gate, so the action is in flight from this moment and stays so until the host reports back.
+          const res = this.response(ev, ev.redacted ? 'redact' : 'allow', decisionId, { approval_id: approvalId, execution: 'host' });
+          save(res, 'executing', approvalId, null);
+          this.audit.append(tenant, this.decisionEvent(ev, 'decision.allowed', res, started));
+          return res;
+        }
         const res = this.response(ev, ev.redacted ? 'redact' : 'allow', decisionId, {
           permit: issuePermit(this.keys.permit, claims), expires_at: iso(claims.exp * 1000), approval_id: approvalId,
         });
@@ -411,6 +419,9 @@ export class Shield {
   // ───────────────────────────── execute ─────────────────────────────
 
   private adapterFor(tool: ToolRecord): ToolAdapter {
+    if (tool.manifest.kind === 'external') {
+      return { invoke: () => Promise.reject(new AdapterError('host_executed', 'This tool is executed by the host, not the gateway.', true)) };
+    }
     return tool.manifest.kind === 'function' ? this.functions : tool.manifest.kind === 'http' ? this.http : this.mcp;
   }
 
@@ -468,35 +479,14 @@ export class Shield {
     }
 
     const action = intent.action;
-    const base = { agent_id: p.principal_id, action_id: action.action_id, decision_id: intent.decision_id, policy_version: intent.policy_version, grant_revision: intent.grant_revision, tool_revision: action.tool_revision };
-    const finish = (state: ExecutionState, body: Partial<ExecutionResponse>, detail: JsonObject, categories: string[] = []): ExecutionResponse => {
-      const event = this.store.tx(() => {
-        this.intents.transition(tenant, action.action_id, 'executing', state === 'denied' ? 'denied' : state);
-        if (state === 'succeeded') this.ledger.commit(tenant, action.action_id);
-        else if (state !== 'unknown') this.ledger.release(tenant, action.action_id);
-        return this.audit.append(tenant, {
-          ...base, event_type: `execution.${state}`, finding_categories: categories, latency_ms: Math.round(performance.now() - started),
-          detail: { action_digest: intent.action_digest, tool_id: action.tool_id, operation: action.operation, destination_id: action.destination_id, ...detail },
-        });
-      });
-      return {
-        action_id: action.action_id, state, result: null, untrusted_content: false, injection: null, finding_categories: categories,
-        result_redacted: false, error: null, ...body,
-        receipt: {
-          event_id: event.event_id, sequence: event.sequence, action_digest: intent.action_digest,
-          result_digest: (detail.result_digest as string) ?? null, provider_ref: (detail.provider_ref as string) ?? null, timestamp: event.timestamp,
-        },
-      };
-    };
-
     // An upstream MCP server can change after review. Compare it with the pin (at most once a minute) before
     // trusting it with this call; drift quarantines the tool, and the re-check below then refuses the permit.
     await this.checkDrift(tenant, action.tool_id);
     const problem = this.revalidate(tenant, claims);
-    if (problem) return finish('denied', { error: problem }, { reason_code: problem.code });
+    if (problem) return this.settle(intent, started, ['executing'], 'denied', { error: problem }, { reason_code: problem.code });
 
     const tool = this.tools.get(tenant, action.tool_id)!;
-    const op = tool.manifest.operations[action.operation]!;
+    const op = operationSpec(tool, action.operation)!;
     const policy = this.policies.active(tenant)?.bundle ?? DEFAULT_POLICY;
 
     let result: Json = null;
@@ -520,7 +510,24 @@ export class Shield {
       if (err instanceof AdapterError && err.result !== undefined) result = err.result;
     }
 
-    // The result is data from outside the decision boundary. Check it before the agent sees it.
+    const checked = this.checkResult(tenant, action, tool, op, policy, result, state);
+    return this.settle(
+      intent, started, ['executing'], state,
+      { ...checked.body, error: error ?? checked.body.error },
+      { ...checked.detail, provider_ref: providerRef, error_code: error?.code ?? (checked.detail.error_code as string | null) },
+      checked.categories,
+    );
+  }
+
+  /**
+   * A tool result is data from outside the decision boundary. Before an agent
+   * sees it: it must be valid, within the size limit and match the reviewed
+   * schema, or it is withheld; credentials are replaced with placeholders;
+   * injection signals are scored; and what the task has now been exposed to
+   * is recorded.
+   */
+  private checkResult(tenant: string, action: BoundAction, tool: ToolRecord, op: OperationSpec, policy: PolicyBundle, raw: Json, state: ExecutionState): { body: Partial<ExecutionResponse>; detail: JsonObject; categories: string[] } {
+    let result = raw;
     let withheld: Reason | null = null;
     let canonical = '';
     try {
@@ -550,18 +557,110 @@ export class Shield {
     ]);
     this.catalog.recordExposure(tenant, action.task_id, { labels, untrusted, injection: injection.score });
 
-    const categories = categoriesOf(findings);
-    return finish(
-      state,
-      { result, untrusted_content: untrusted, injection: injection.signals.length ? injection : null, result_redacted: resultRedacted, error: error ?? withheld },
-      {
-        result_digest: withheld ? null : digest(result),
-        provider_ref: providerRef,
-        error_code: error?.code ?? withheld?.code ?? null,
-        injection_score: injection.score,
-        result_redacted: resultRedacted,
+    return {
+      body: { result, untrusted_content: untrusted, injection: injection.signals.length ? injection : null, result_redacted: resultRedacted, error: withheld },
+      detail: { result_digest: withheld ? null : digest(result), error_code: withheld?.code ?? null, injection_score: injection.score, result_redacted: resultRedacted },
+      categories: categoriesOf(findings),
+    };
+  }
+
+  /** Move an action to its final state, settle its budget and append the signed execution event, in one transaction. */
+  private settle(intent: Intent, started: number, from: IntentState[], state: ExecutionState, body: Partial<ExecutionResponse>, detail: JsonObject, categories: string[] = []): ExecutionResponse {
+    const tenant = intent.tenant_id;
+    const action = intent.action;
+    const event = this.store.tx(() => {
+      this.intents.transition(tenant, action.action_id, from, state);
+      if (state === 'succeeded') this.ledger.commit(tenant, action.action_id);
+      else if (state !== 'unknown') this.ledger.release(tenant, action.action_id);
+      return this.audit.append(tenant, {
+        agent_id: intent.agent_id, action_id: action.action_id, decision_id: intent.decision_id, policy_version: intent.policy_version,
+        grant_revision: intent.grant_revision, tool_revision: action.tool_revision,
+        event_type: `execution.${state}`, finding_categories: categories, latency_ms: Math.round(performance.now() - started),
+        detail: { action_digest: intent.action_digest, tool_id: action.tool_id, operation: action.operation, destination_id: action.destination_id, ...detail },
+      });
+    });
+    return {
+      action_id: action.action_id, state, result: null, untrusted_content: false, injection: null, finding_categories: categories,
+      result_redacted: false, error: null, ...body,
+      receipt: {
+        event_id: event.event_id, sequence: event.sequence, action_digest: intent.action_digest,
+        result_digest: (detail.result_digest as string) ?? null, provider_ref: (detail.provider_ref as string) ?? null, timestamp: event.timestamp,
       },
-      categories,
+    };
+  }
+
+  /**
+   * Record what happened to an action the host executed itself (a tool of
+   * kind `external`). The host calls this after its tool returns, with the
+   * result; the gateway checks the result exactly as it would its own, and
+   * hands back the version that is safe to show the model.
+   *
+   * `status` is the host's account: `ok`, `error`, or `blocked` when the tool
+   * never ran. An action that was awaiting approval may be reported as run
+   * only with `host_approved`, meaning the host's own approval prompt said
+   * yes; that is recorded as such, and is as trustworthy as the host is.
+   */
+  reportOutcome(p: Principal, actionId: string, body: Json): ExecutionResponse {
+    requirePermission(p, 'agent:execute');
+    const tenant = p.tenant_id;
+    const started = performance.now();
+    if (!isObject(body)) throw new ShieldError(400, 'invalid_body', 'Request body must be a JSON object.');
+    const status = body.status;
+    if (status !== 'ok' && status !== 'error' && status !== 'blocked') throw new ShieldError(422, 'invalid_field', 'status must be ok, error or blocked.');
+    const intent = this.intents.get(tenant, actionId);
+    if (!intent || intent.agent_id !== p.principal_id) throw new ShieldError(404, 'action_not_found', 'No such action.');
+    const tool = this.tools.get(tenant, intent.action.tool_id);
+    const op = operationSpec(tool, intent.action.operation);
+    if (!tool || tool.manifest.kind !== 'external' || !op) {
+      throw new ShieldError(409, 'not_host_executed', 'Outcomes can only be reported for tools the host executes itself.');
+    }
+    const policy = this.policies.active(tenant)?.bundle ?? DEFAULT_POLICY;
+    const notRun: Reason = { code: 'not_executed', message: 'The host did not run this action.' };
+    const detail: JsonObject = { executed_by: 'host' };
+
+    let from: IntentState;
+    if (intent.state === 'executing') {
+      from = 'executing';
+    } else if (intent.state === 'pending' || intent.state === 'approved') {
+      from = intent.state;
+      if (status === 'blocked') {
+        this.store.run(`UPDATE approvals SET status='superseded' WHERE tenant_id=? AND action_id=? AND status IN ('pending','approved')`, tenant, actionId);
+        return this.settle(intent, started, [from], 'denied', { error: notRun }, { ...detail, reason_code: 'not_approved' });
+      }
+      if (body.host_approved !== true) throw new ShieldError(409, 'approval_required', 'This action is awaiting approval and was not approved at the host.');
+      detail.approval = 'host';
+      this.store.tx(() => {
+        this.store.run(`UPDATE approvals SET status='superseded', reason='approved at the host' WHERE tenant_id=? AND action_id=? AND status IN ('pending','approved')`, tenant, actionId);
+        // No reservation was made while the action waited. Make it now; if the money is not there, say so loudly.
+        const amount = extractAmount(toEnvelope(intent.action), op).amount;
+        const grant = intent.grant_id ? this.grants.get(tenant, intent.grant_id) : undefined;
+        let budget = 'none';
+        if (amount && grant) {
+          try {
+            this.ledger.reserve(this.grants.chain(grant), actionId, amount.minor, amount.currency);
+            budget = 'reserved';
+          } catch {
+            budget = 'exceeded';
+          }
+        }
+        this.audit.append(tenant, {
+          event_type: 'approval.host_approved', agent_id: intent.agent_id, action_id: actionId, decision_id: intent.decision_id,
+          detail: { action_digest: intent.action_digest, approval_id: intent.approval_id, budget },
+        });
+      });
+    } else {
+      throw new ShieldError(409, 'action_already_decided', `This action is already ${intent.state}.`, { state: intent.state });
+    }
+
+    if (status === 'blocked') return this.settle(intent, started, [from], 'failed', { error: notRun }, { ...detail, error_code: notRun.code });
+    const state: ExecutionState = status === 'ok' ? 'succeeded' : 'failed';
+    const checked = this.checkResult(tenant, intent.action, tool, op, policy, body.result ?? null, state);
+    const hostError: Reason | null = status === 'error' ? { code: 'tool_reported_error', message: 'The host reported that the tool call failed.' } : null;
+    return this.settle(
+      intent, started, [from], state,
+      { ...checked.body, error: hostError ?? checked.body.error },
+      { ...detail, ...checked.detail, error_code: hostError?.code ?? (checked.detail.error_code as string | null) },
+      checked.categories,
     );
   }
 
@@ -569,6 +668,7 @@ export class Shield {
   async run(p: Principal, raw: Json, opts: { approvalId?: string; reuseKey?: string } = {}): Promise<RunResponse> {
     const decision = this.authorize(p, raw, opts);
     if (decision.decision !== 'allow' && decision.decision !== 'redact') return { decision, execution: null };
+    if (!decision.permit) return { decision, execution: null }; // host-executed: the caller runs it and reports back
     const action = decision.transformed_action ?? { ...(raw as JsonObject) };
     return { decision, execution: await this.execute(p, action as unknown as Json, decision.permit!) };
   }
@@ -994,7 +1094,7 @@ export class Shield {
     const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
     const all = this.audit.list(p.tenant_id, { agentId, after: opts.after, limit: 1000 });
     const risky = all.filter((e) => ['decision.blocked', 'decision.approval_required', 'execution.denied', 'execution.unknown', 'delegation.denied', 'scan.input_flagged', 'agent.suspended'].includes(e.event_type)
-      || (e.event_type === 'permit.issued' && e.detail.risk_level !== 'low'));
+      || ((e.event_type === 'permit.issued' || e.event_type === 'decision.allowed') && e.detail.risk_level !== 'low'));
     const items = risky.slice(0, limit).map((e) => ({
       event_id: e.event_id, sequence: e.sequence, timestamp: e.timestamp, event_type: e.event_type, action_id: e.action_id,
       risk_level: (e.detail.risk_level as string) ?? null, risk_score: (e.detail.risk_score as number) ?? null,
@@ -1026,7 +1126,7 @@ export class Shield {
     return {
       report_id: newId('rpt'), generated_at: iso(this.clock.now()), range: { from: iso(fromMs), to: iso(toMs) },
       summary: {
-        permits_issued: counts['permit.issued'] ?? 0, blocked: counts['decision.blocked'] ?? 0, approvals_required: counts['decision.approval_required'] ?? 0,
+        permits_issued: counts['permit.issued'] ?? 0, allowed_host_executed: counts['decision.allowed'] ?? 0, blocked: counts['decision.blocked'] ?? 0, approvals_required: counts['decision.approval_required'] ?? 0,
         approvals_granted: counts['approval.approved'] ?? 0, approvals_rejected: counts['approval.rejected'] ?? 0, executions: sum('execution.'),
         executions_unknown: counts['execution.unknown'] ?? 0, tools_quarantined: counts['tool.quarantined'] ?? 0, agents_suspended: counts['agent.suspended'] ?? 0,
       },

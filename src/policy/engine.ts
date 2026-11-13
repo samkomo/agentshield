@@ -150,7 +150,9 @@ export function decide(policy: PolicyBundle, input: PolicyInput): PolicyOutcome 
   if (destination?.class === 'external' && top && labelRank(policy, top) >= labelRank(policy, policy.data_flow.external_approval_label)) {
     approve.push({ code: 'sensitive_external_send', message: `Sending ${top} data outside the organisation is permitted only with approval.` });
   }
-  const resourceTop = highestLabel(policy, input.labels);
+  // The label on the record being changed, from the catalog. Personal data that merely appears in what is
+  // written is governed by whether the destination may receive it, not by this rule.
+  const resourceTop = highestLabel(policy, input.resourceLabels);
   if (op?.effect === 'write' && cls === 'data_write' && resourceTop && labelRank(policy, resourceTop) >= labelRank(policy, policy.data_flow.write_approval_label)) {
     approve.push({ code: 'sensitive_write', message: `Changing ${resourceTop} records is permitted only with approval.` });
   }

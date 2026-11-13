@@ -41,6 +41,19 @@ node src/cli.ts serve --dir .agentshield
 
 `init` creates keys, the database, the signed default policy and three credentials (`admin`, `security`, `auditor`) in `.agentshield/bootstrap-credentials.json`, readable only by you. The gateway listens on `127.0.0.1:8787`; use `--socket PATH` for an owner-only Unix socket instead.
 
+## Documentation
+
+| | |
+|---|---|
+| [Architecture](docs/architecture.md) | How a decision is made and carried out |
+| [REST API reference](docs/api.md) | Every route, status code and reason code |
+| [Integrating an agent](docs/integration.md) | SDKs, MCP, REST, in-process, and closing the bypass |
+| [Registering tools](docs/tools.md) | Manifests for REST APIs and MCP servers |
+| [Policy](docs/policy.md) | Bundle reference, lifecycle, risk scoring |
+| [Operations runbook](docs/operations.md) | Running it, backups, audit verification, incidents |
+| [Threat model and coverage](docs/threat-model.md) | What is addressed, what is not, what the tests cover |
+| [Research report](docs/research/AgentSecurity_Illustrated_Research_Report.html) | The design this was built from |
+
 ## What it enforces
 
 | Property | How |
@@ -186,6 +199,7 @@ src/gateway/     the pipeline (shield.ts) and REST server
 sdk/             Python and TypeScript clients
 tests/           workflows, invariants, end-to-end, detectors, primitives
 examples/        demo and the synthetic organisation it runs against
+docs/            architecture, API, integration, tools, policy, operations, threat model
 ```
 
 ## Differences from the report, and what is not here

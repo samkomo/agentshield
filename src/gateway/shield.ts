@@ -489,6 +489,9 @@ export class Shield {
       };
     };
 
+    // An upstream MCP server can change after review. Compare it with the pin (at most once a minute) before
+    // trusting it with this call; drift quarantines the tool, and the re-check below then refuses the permit.
+    await this.checkDrift(tenant, action.tool_id);
     const problem = this.revalidate(tenant, claims);
     if (problem) return finish('denied', { error: problem }, { reason_code: problem.code });
 

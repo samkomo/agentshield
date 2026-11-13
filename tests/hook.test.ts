@@ -177,35 +177,28 @@ test('a catch-all operation is only accepted on host-executed tools', () => {
   assert.throws(() => w.shield.registerTool(w.admin, { tool_id: 'x', kind: 'function', owner: 'it', destination_id: 'docs.internal', operations: { '*': { class: 'data_read', effect: 'read' } } }), code('invalid_manifest'));
 });
 
-test('CLI: `connect hermes` prepares the gateway side, is safe to repeat, and never prints the credential', async () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'agentshield-connect-'));
+test('CLI: `enroll hermes` prepares the gateway side, is safe to repeat, and never prints the credential', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'agentshield-enroll-'));
   const dir = join(tmp, 'data');
-  const share = join(tmp, 'shared');
   const run = (...args: string[]) => promisify(execFile)(process.execPath, [join(ROOT, 'src/cli.ts'), ...args, '--dir', dir], { env: { ...process.env, HOME: join(tmp, 'home') } });
   try {
     await run('init', '--tenant', 'oscar');
-    const first = await run('connect', 'hermes', '--user', 'some-other-account', '--share-dir', share);
-    assert.match(first.stdout, /created agent "some-other-account"/);
+    const first = await run('enroll', 'hermes', '--agent', 'some-agent');
+    assert.match(first.stdout, /created agent "some-agent"/);
     assert.match(first.stdout, /registered the "hermes" tool preset \(43 operations\)/);
-    assert.match(first.stdout, /hermes plugins enable agentshield/);
-    assert.match(first.stdout, /sudo -u some-other-account/);
-    const token = readFileSync(join(dir, 'agents', 'some-other-account.token'), 'utf8').trim();
+    assert.match(first.stdout, /agentshield connect hermes --token-stdin < /);
+    const token = readFileSync(join(dir, 'agents', 'some-agent.token'), 'utf8').trim();
     assert.ok(token.startsWith('as_') && !first.stdout.includes(token));
-    assert.equal(statSync(join(dir, 'agents', 'some-other-account.token')).mode & 0o077, 0);
-    assert.ok(existsSync(join(share, 'hermes', 'agentshield', 'plugin.yaml')));
-    assert.equal(statSync(join(share, 'hermes', 'agentshield', '__init__.py')).mode & 0o022, 0, 'published plugin is not writable by others');
+    assert.equal(statSync(join(dir, 'agents', 'some-agent.token')).mode & 0o077, 0);
+    assert.ok(!existsSync(join(tmp, 'home', '.config')), 'the gateway side writes nothing into an agent account');
 
-    const again = await run('connect', 'hermes', '--user', 'some-other-account', '--share-dir', share);
+    const again = await run('enroll', 'hermes', '--agent', 'some-agent');
     assert.match(again.stdout, /nothing to change/);
-    assert.equal(readFileSync(join(dir, 'agents', 'some-other-account.token'), 'utf8').trim(), token, 'a repeat run keeps the working credential');
+    assert.equal(readFileSync(join(dir, 'agents', 'some-agent.token'), 'utf8').trim(), token, 'a repeat run keeps the working credential');
 
-    const rotated = await run('connect', 'hermes', '--user', 'some-other-account', '--share-dir', share, '--rotate');
+    const rotated = await run('enroll', 'hermes', '--agent', 'some-agent', '--rotate');
     assert.match(rotated.stdout, /issued a new credential/);
-    assert.notEqual(readFileSync(join(dir, 'agents', 'some-other-account.token'), 'utf8').trim(), token);
-
-    const same = await run('connect', 'hermes', '--agent', 'local-agent');
-    assert.match(same.stdout, /cp -R .*integrations\/hermes\/agentshield/);
-    assert.equal(statSync(join(tmp, 'home', '.config', 'agentshield', 'token')).mode & 0o077, 0);
+    assert.notEqual(readFileSync(join(dir, 'agents', 'some-agent.token'), 'utf8').trim(), token);
     assert.match((await run('audit', 'verify')).stdout, /Chain intact/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

@@ -2,6 +2,7 @@ name: agentshield
 version: "0.1.0"
 description: "Checks every tool call with a local AgentShield gateway before it runs: blocks what the policy denies, sends risky calls to the approval prompt, strips credentials and personal data from arguments, and removes credentials from tool results before the model sees them."
 author: "AgentShield"
+requires_hermes: ">=0.22.0"
 provides_hooks:
   - pre_tool_call
   - post_tool_call

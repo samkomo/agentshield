@@ -11,9 +11,37 @@ agent ──► execute(permit) ──► exact-action check · one use · re-ch
                           ──► tool call with brokered credential ──► scan result ──► signed receipt
 ```
 
-## Quick start
+## Install
 
-Requires Node.js 24 or later. There are no runtime dependencies; `npm install` only fetches TypeScript for type-checking.
+Requires macOS or Linux, Node.js 24 or later, and Git. Nothing uses `sudo` or writes outside your home directory.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/samkomo/agentshield/main/install.sh | bash
+```
+
+```bash
+agentshield service install
+```
+
+```bash
+agentshield connect hermes
+```
+
+```bash
+agentshield doctor
+```
+
+The first line puts an `agentshield` command in `~/.local/bin`. The second creates the gateway's keys and database in `~/.agentshield` and keeps the gateway running in the background. The third finds your [Hermes](https://github.com/NousResearch/hermes-agent) agent, installs the AgentShield plugin through Hermes's own installer, and sends a test call through to prove it works. The fourth checks every link and tells you what to run if one is broken.
+
+From then on, a tool call the policy denies is refused with the reason, a risky one goes to Hermes's own approval prompt, credentials and personal data bound for the internet are replaced in the arguments, and credentials in tool results are removed before the model sees them. To watch first without blocking anything, use `agentshield connect hermes --mode monitor`.
+
+**[The install guide](docs/install.md)** covers each step, what is written where, running the agent under a separate account, updating, removing, and what to do when something fails. Hermes is the runtime with a one-line `connect` today; for others see [Other runtimes](docs/install.md#other-runtimes).
+
+The plugin is the quick route, and a weaker boundary than routing a tool through the gateway: Hermes still holds the credentials and runs the tools, and the plugin runs inside Hermes. See [Integrating an agent](docs/integration.md#hermes-plugin) for what that means and when to move a tool behind the gateway.
+
+## From a checkout
+
+To work on AgentShield or try it without installing:
 
 ```bash
 npm install
@@ -27,44 +55,13 @@ npm run demo
 npm test
 ```
 
-`npm run demo` runs the report's twelve security workflows in memory against mock tools and prints what was decided and whether anything reached the tool. `npm test` runs 100 tests, including the adversarial invariant suite.
-
-To run a gateway:
-
-```bash
-node src/cli.ts up
-```
-
-The first run creates `~/.agentshield` (override with `--dir` or `$AGENTSHIELD_HOME`): keys, the database, the signed default policy and three credentials (`admin`, `security`, `auditor`) in `bootstrap-credentials.json`, readable only by you. The gateway then listens on `127.0.0.1:8787`; use `--socket PATH` for an owner-only Unix socket instead. `init` and `serve` do the two halves separately.
-
-## Install for a Hermes agent
-
-[Hermes](https://github.com/NousResearch/hermes-agent) lets a plugin see every tool call before and after it runs. The AgentShield plugin uses that to check all of them — built-in tools, MCP servers and other plugins — with no changes to the agent.
-
-With the gateway running, prepare it for the agent:
-
-```bash
-node src/cli.ts connect hermes
-```
-
-Then, where Hermes runs, install and enable the plugin (the command above prints this line with the right paths):
-
-```bash
-mkdir -p ~/.hermes/plugins && cp -R integrations/hermes/agentshield ~/.hermes/plugins/ && hermes plugins enable agentshield
-```
-
-Restart Hermes. Once this repository is on GitHub the second step becomes `hermes plugins install <owner>/<repo>/integrations/hermes/agentshield --enable`.
-
-If Hermes runs under a different account on the same machine, use `connect hermes --user ACCOUNT`: it publishes the plugin where that account can read it and prints the line that hands over the credential.
-
-From then on a blocked call is refused with the reason, a risky one goes to Hermes's own approval prompt, credentials and personal data bound for the internet are replaced in the arguments, and credentials in tool results are removed before the model sees them. Set `AGENTSHIELD_MODE=monitor` in `~/.hermes/.env` to log what would happen without blocking anything.
-
-This is the quick route, and a weaker boundary than routing a tool through the gateway: Hermes still holds the credentials and runs the tools, and the plugin runs inside Hermes. See [Integrating an agent](docs/integration.md#hermes-plugin) for what that means and when to move a tool behind the gateway.
+`npm install` only fetches TypeScript for type-checking; the gateway runs its `.ts` sources directly. `npm run demo` runs the report's twelve security workflows in memory against mock tools and prints what was decided and whether anything reached the tool. `npm test` runs 104 tests, including the adversarial invariant suite and the install path. `node src/cli.ts` is the same command the installer puts on your `PATH`.
 
 ## Documentation
 
 | | |
 |---|---|
+| [Install](docs/install.md) | From nothing to a protected agent, and back |
 | [Architecture](docs/architecture.md) | How a decision is made and carried out |
 | [REST API reference](docs/api.md) | Every route, status code and reason code |
 | [Integrating an agent](docs/integration.md) | SDKs, MCP, REST, in-process, and closing the bypass |
@@ -72,7 +69,6 @@ This is the quick route, and a weaker boundary than routing a tool through the g
 | [Policy](docs/policy.md) | Bundle reference, lifecycle, risk scoring |
 | [Operations runbook](docs/operations.md) | Running it, backups, audit verification, incidents |
 | [Threat model and coverage](docs/threat-model.md) | What is addressed, what is not, what the tests cover |
-| [Research report](docs/research/AgentSecurity_Illustrated_Research_Report.html) | The design this was built from |
 
 ## What it enforces
 

@@ -7,3 +7,5 @@ __pycache__/
 build/
 *.egg-info/
 dist/
+# The research report is kept privately, not published with the code.
+docs/research/

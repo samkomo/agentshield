@@ -4,17 +4,13 @@ How to install, run and look after a gateway, and what to do when something goes
 
 ## Install
 
-Node.js 24 or later. Nothing else.
+Node.js 24 or later and Git. Nothing else.
 
 ```bash
-git clone <repository> agentshield
+curl -fsSL https://raw.githubusercontent.com/samkomo/agentshield/main/install.sh | bash
 ```
 
-```bash
-cd agentshield && npm install
-```
-
-`npm install` fetches TypeScript for type-checking only. The gateway runs its `.ts` sources directly.
+This puts a checkout in `~/.local/share/agentshield` and an `agentshield` command in `~/.local/bin`; see the [install guide](install.md). The gateway runs its `.ts` sources directly, so there is nothing to build. In a checkout you cloned yourself, `node src/cli.ts` is the same command.
 
 ## Initialise
 
@@ -68,7 +64,7 @@ node src/cli.ts serve --dir /var/lib/agentshield --port 8787
 - **Run it as its own OS user.** The agent's user must not be able to read the data directory.
 - **Keep it on loopback or a Unix socket.** There is no TLS. To serve other hosts, put a TLS-terminating proxy in front and treat that as part of the trusted base. The SDKs and the MCP bridge speak HTTP over TCP; the Unix socket is for clients that support one (`curl --unix-socket`).
 - **Environment.** Any variable a tool's `credential_ref` names (`env:CRM_API_TOKEN`) must be set for the gateway process, and for nothing the agent runs as.
-- **Supervision.** Run it under launchd, systemd or similar, restarting on exit. It handles `SIGTERM` by closing connections, writing a checkpoint and exiting.
+- **Supervision.** `agentshield service install` registers a per-user launchd agent (macOS) or systemd user unit (Linux) that starts at login and is restarted if the gateway exits with an error; `service status` and `service uninstall` are its counterparts. It writes to `gateway.log` in the data directory. Under any other supervisor, run `agentshield serve` and restart on exit. The gateway handles `SIGTERM` by closing connections, writing a checkpoint and exiting.
 - **One process per data directory.** Running two against the same database is not tested.
 
 Health: `GET /healthz` returns `200 {"status":"ok"}` without authentication.
@@ -124,12 +120,20 @@ A checkpoint is useless for detecting truncation if the attacker can rewrite it 
 ### Connect or renew a Hermes agent
 
 ```bash
-node src/cli.ts connect hermes --dir /var/lib/agentshield --user oscar
+agentshield connect hermes
 ```
 
-Registers the Hermes tool preset and destinations, creates the agent with a standing grant (90 days; `--days` to change), and prints the lines that hand over the credential and install the plugin. Running it again changes only what is missing, so it is also how you renew an expired grant or pick up a newer preset. `--rotate` issues a new credential and invalidates the old one. See [Integrating an agent](integration.md#hermes-plugin).
+Finds Hermes, registers the Hermes tool preset and destinations, creates the agent with a standing grant (90 days; `--days` to change), installs the plugin through Hermes and tests it. Running it again changes only what is missing, so it is also how you renew an expired grant or pick up a newer preset or plugin. `--rotate` issues a new credential and invalidates the old one. When the agent runs in another account, `agentshield enroll hermes` does the gateway's half. See the [install guide](install.md).
 
-When the grant expires every tool call is blocked with `no_active_grant` until it is renewed.
+When the grant expires every tool call is blocked with `no_active_grant` until it is renewed. `agentshield doctor` warns from 14 days before.
+
+### Check an installation
+
+```bash
+agentshield doctor
+```
+
+Checks the gateway, the service, each connected agent's grant, and — where Hermes is installed in this account — the plugin, the credential and a test call. It exits non-zero if anything failed and names the command that fixes it. Run it after `hermes update`: Hermes disables a plugin that no longer fits a new release, and a disabled plugin checks nothing.
 
 ### Change policy
 
@@ -227,7 +231,7 @@ In both cases: stop the gateway, preserve the database file and checkpoints as t
 
 Known operational gaps, so they are not discovered during an incident:
 
-- No credential rotation route (`connect hermes --rotate` rotates a Hermes agent's), and no route to disable a non-agent principal.
+- No credential rotation route (`connect hermes --rotate` or `enroll hermes --rotate` rotates a Hermes agent's), and no route to disable a non-agent principal.
 - No way to create principals in a second tenant over REST; `init` creates the first tenant's.
 - The checkpoint sink path is fixed when using the CLI.
 - No built-in notification when an approval is waiting.

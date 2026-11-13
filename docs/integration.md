@@ -18,27 +18,23 @@ Hermes calls plugin hooks before and after every tool call. The plugin in [integ
 
 ### Install
 
-On the account that runs the gateway:
-
 ```bash
-node src/cli.ts up
+agentshield service install
 ```
 
 ```bash
-node src/cli.ts connect hermes
+agentshield connect hermes
 ```
 
-`connect hermes` registers the destinations and the tool preset, creates an agent identity with a 90-day standing grant, saves its credential, and prints the install line. It is safe to run again: it changes only what is missing, and keeps a working credential unless you pass `--rotate`. Run it again to renew the grant when it expires.
+The first keeps a gateway running; the second finds Hermes, sets up the gateway side, installs the plugin and tests it. The [install guide](install.md) walks through both, including a separate account for the agent.
 
-Where Hermes runs:
+`connect hermes` never assumes where Hermes lives. It asks the `hermes` command for its version, its home directory (`hermes config path`, which follows `HERMES_HOME` and profiles) and its plugin list, and it will not touch Hermes unless the gateway is answering. On the gateway it registers the destinations and the tool preset and creates an agent identity with a 90-day standing grant. The plugin is installed with `hermes plugins install`, pinned to the commit of the AgentShield checkout, so Hermes's source scan, `requires_hermes` version gate and install record apply. From a packaged build, or a checkout with uncommitted plugin changes, it is copied into Hermes's plugin folder and enabled with `hermes plugins enable` instead.
 
-```bash
-mkdir -p ~/.hermes/plugins && cp -R integrations/hermes/agentshield ~/.hermes/plugins/ && hermes plugins enable agentshield
-```
+It is safe to run again: it changes only what is missing, keeps a working credential unless you pass `--rotate`, and is how the grant is renewed and the plugin updated.
 
-Restart Hermes. From a GitHub checkout of this repository the same thing is `hermes plugins install <owner>/<repo>/integrations/hermes/agentshield --enable`.
+**A different account for the agent.** `agentshield enroll hermes` in the gateway's account does the gateway's half and saves the credential; `agentshield connect hermes --token-stdin` in the agent's account does the rest. Running the two as different accounts is the better arrangement: the agent cannot read the gateway's keys or database.
 
-**A different account for the agent.** `connect hermes --user oscar` copies the plugin to a folder that account can read (`/Users/Shared/agentshield` on macOS; `--share-dir` elsewhere) and prints two lines: one that writes the credential into that account's `~/.config/agentshield/token` without displaying it, and the install line to run there. Running the gateway and the agent as different accounts is the better arrangement: the agent cannot read the gateway's keys or database.
+**When the plugin is not there.** A hook that fails or times out blocks the call. A plugin that Hermes has not loaded checks nothing: that happens under `hermes --safe-mode`, when the plugin is disabled, and when `hermes update` disables a plugin that no longer fits the new release. `agentshield doctor` reports all three.
 
 ### What happens to a tool call
 
@@ -69,7 +65,7 @@ Two things to expect on day one: a shell command or file write containing someth
 
 ### Settings
 
-Environment variables, read on every call; `~/.hermes/.env` is a good place for them.
+Environment variables, read on every call. `connect` keeps `AGENTSHIELD_MODE` and `AGENTSHIELD_URL` in the `.env` file of the Hermes home (`hermes config env-path` prints where that is); the others can go there too.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -80,7 +76,7 @@ Environment variables, read on every call; `~/.hermes/.env` is a good place for 
 | `AGENTSHIELD_FAIL_OPEN` | `0` | `1` lets tool calls through when the gateway cannot be reached. Not recommended |
 | `AGENTSHIELD_TIMEOUT` | `10` | Seconds to wait for the gateway |
 
-Start in `monitor`, read the log for a day, then remove the setting.
+Start with `agentshield connect hermes --mode monitor`, read the log for a day, then `--mode enforce`.
 
 ### What this route is, and is not
 

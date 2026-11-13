@@ -1,8 +1,12 @@
 /**
  * agentshield — command line for the local gateway.
  *
+ *   service       run the gateway in the background (launchd / systemd user service)
+ *   connect       find an agent runtime, install into it and test it (currently: hermes)
+ *   enroll        the gateway's half of connect, for an agent in another account
+ *   disconnect    take AgentShield back out of an agent runtime
+ *   doctor        check every link from the agent to the gateway
  *   up            create the data directory if needed, then run the gateway
- *   connect       set an agent runtime up to use the gateway (currently: hermes)
  *   init          create a data directory: keys, database, default policy, first credentials
  *   serve         run the gateway
  *   policy sign   sign a policy bundle with the policy key
@@ -10,14 +14,20 @@
  *   mcp-stdio     bridge a stdio MCP client to the gateway's MCP endpoint
  *   demo          run the twelve reference workflows in memory
  */
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Checkpoint } from './audit/events.ts';
 import { generateKeyDir, loadKeyDir, signingKeyFromPem } from './core/crypto.ts';
 import { digest, parseStrict, type Json } from './core/json.ts';
 import type { Destination, GrantScope, ToolManifest } from './core/types.ts';
+import {
+  InstallError, MIN_HERMES, detectHermes, gatewayHealth, hookSelfTest, installPlugin, pluginCurrent, pluginSource,
+  readMode, readUrl, removePlugin, tokenPath, tokenState, versionAtLeast, writeMode, writeToken, writeUrl, type HermesInfo,
+} from './install/hermes.ts';
+import { installService, serviceState, uninstallService } from './install/service.ts';
 import { validateManifest } from './registry/tools.ts';
 import { startServer } from './gateway/server.ts';
 import { Shield } from './gateway/shield.ts';
@@ -75,7 +85,7 @@ function tenantOf(dir: string, flags: Record<string, string | true>): string {
   }
 }
 
-function init(dir: string, tenant: string): void {
+function init(dir: string, tenant: string, next = `agentshield serve --dir ${dir}`): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   writeFileSync(join(dir, 'config.json'), `${JSON.stringify({ tenant }, null, 2)}\n`, { mode: 0o600 });
@@ -97,8 +107,7 @@ function init(dir: string, tenant: string): void {
   Policy:       ${record.policy_id} v${record.version} (active)
   Credentials:  ${resolve(credPath)}  (admin, security, auditor — owner-readable only; shown nowhere else)
   Policy key:   ${resolve(join(dir, 'keys', 'policy-signing.key'))}
-                Move this off the gateway host before production use. The gateway only needs keys/trust/*.pub.
-Next: agentshield serve --dir ${dir}`);
+                Move this off the gateway host before production use. The gateway only needs keys/trust/*.pub.${next ? `\nNext: ${next}` : ''}`);
 }
 
 async function serve(dir: string, flags: Record<string, string | true>): Promise<void> {
@@ -123,34 +132,37 @@ async function serve(dir: string, flags: Record<string, string | true>): Promise
   process.on('SIGTERM', stop);
 }
 
-/** Recursively make a published folder readable by everyone and writable only by its owner. */
-function publishReadOnly(path: string): void {
-  const isDir = statSync(path).isDirectory();
-  chmodSync(path, isDir ? 0o755 : 0o644);
-  if (isDir) for (const name of readdirSync(path)) publishReadOnly(join(path, name));
-}
-
 interface HermesPreset {
   destinations: Omit<Destination, 'tenant_id'>[];
   grant_scope: GrantScope;
   tool: ToolManifest;
 }
 
+/** The gateway address named on the command line or in the environment, if any. */
+const statedUrl = (flags: Record<string, string | true>): string | undefined => {
+  const stated = typeof flags.url === 'string' ? flags.url : typeof flags.port === 'string' ? `http://127.0.0.1:${flags.port}` : process.env.AGENTSHIELD_URL;
+  return stated?.replace(/\/$/, '');
+};
+const gatewayUrl = (flags: Record<string, string | true>): string => statedUrl(flags) ?? 'http://127.0.0.1:8787';
+
+function versionLine(): string {
+  const root = packageRoot();
+  const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string };
+  const rev = spawnSync('git', ['-C', root, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return `agentshield ${version}${rev.status === 0 && rev.stdout.trim() ? ` (${rev.stdout.trim()})` : ''}`;
+}
+
 /**
- * Everything the gateway side needs for a Hermes agent to use it: the
- * destinations and tool preset, an agent identity with a standing grant, the
- * credential, and the plugin laid out where the agent's account can pick it
- * up. Safe to run again; it changes only what is missing or out of date.
+ * The gateway's half of connecting a Hermes agent: the destinations and tool
+ * preset, an agent identity with a standing grant, and its credential saved
+ * owner-only in the data directory. Safe to repeat; it changes only what is
+ * missing or out of date, which is also how a grant is renewed.
  */
-function connectHermes(dir: string, flags: Record<string, string | true>): void {
+function enrollHermes(dir: string, flags: Record<string, string | true>, agentId: string): { tokenPath: string; token: string; tenant: string; done: string[] } {
   const tenant = tenantOf(dir, flags);
-  const user = typeof flags.user === 'string' ? flags.user : undefined;
-  const agentId = flag(flags, 'agent', user ?? 'hermes-agent');
   const days = Number(flag(flags, 'days', '90'));
   if (!(days > 0)) throw new Error('--days must be a positive number.');
-  const root = packageRoot();
-  const pluginSource = join(root, 'integrations', 'hermes', 'agentshield');
-  const preset = parseStrict(readFileSync(join(root, 'integrations', 'hermes', 'preset.json'), 'utf8')) as unknown as HermesPreset;
+  const preset = parseStrict(readFileSync(join(packageRoot(), 'integrations', 'hermes', 'preset.json'), 'utf8')) as unknown as HermesPreset;
   const tokenDir = join(dir, 'agents');
   const tokenPath = join(tokenDir, `${agentId}.token`);
   const done: string[] = [];
@@ -204,42 +216,240 @@ function connectHermes(dir: string, flags: Record<string, string | true>): void 
   mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
   writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
   chmodSync(tokenPath, 0o600);
+  return { tokenPath, token, tenant, done };
+}
 
-  const pluginsDir = '"${HERMES_HOME:-$HOME/.hermes}/plugins"';
-  const lines: string[] = [];
-  if (user && user !== userInfo().username) {
-    // Another account cannot read this one's files, so lay the plugin out somewhere it can.
-    const share = flag(flags, 'share-dir', process.platform === 'darwin' ? '/Users/Shared/agentshield' : '');
-    if (!share) throw new Error('Pass --share-dir with a folder the other account can read.');
-    const published = join(share, 'hermes', 'agentshield');
-    rmSync(published, { recursive: true, force: true });
-    mkdirSync(dirname(published), { recursive: true });
-    cpSync(pluginSource, published, { recursive: true, filter: (src) => !src.includes('__pycache__') });
-    publishReadOnly(share);
-    lines.push(
-      `1. Hand "${user}" its credential (asks for your password; the credential is never displayed):`,
-      `     sudo -u ${user} sh -c 'umask 077; mkdir -p ~/.config/agentshield; cat > ~/.config/agentshield/token' < ${tokenPath}`,
-      `2. In the "${user}" account, install the plugin:`,
-      `     mkdir -p ${pluginsDir} && cp -R ${published} ${pluginsDir}/ && hermes plugins enable agentshield`,
-      `3. Restart Hermes in that account.`,
-    );
-  } else {
-    const own = join(homedir(), '.config', 'agentshield');
-    mkdirSync(own, { recursive: true, mode: 0o700 });
-    writeFileSync(join(own, 'token'), `${token}\n`, { mode: 0o600 });
-    chmodSync(join(own, 'token'), 0o600);
-    lines.push(
-      `1. Install the plugin:`,
-      `     mkdir -p ${pluginsDir} && cp -R ${pluginSource} ${pluginsDir}/ && hermes plugins enable agentshield`,
-      `2. Restart Hermes.`,
-    );
+/** `enroll hermes`: the gateway's half only, for when Hermes runs in a different account from the gateway. */
+function enrollCommand(dir: string, flags: Record<string, string | true>): void {
+  const agentId = flag(flags, 'agent', 'hermes');
+  const e = enrollHermes(dir, flags, agentId);
+  console.log(`Gateway ready for Hermes agent "${agentId}" (tenant "${e.tenant}").`);
+  for (const d of e.done) console.log(`  - ${d}`);
+  if (!e.done.length) console.log('  - nothing to change');
+  console.log(`
+The agent's credential is in ${e.tokenPath} (owner-only; it is not displayed anywhere).
+
+In the account that runs Hermes, install AgentShield the same way, then run this with the
+credential on standard input:
+
+  agentshield connect hermes --token-stdin < ${e.tokenPath}
+
+From this account, for an agent account named ACCOUNT, that is:
+
+  sudo -u ACCOUNT -H -i agentshield connect hermes --token-stdin < ${e.tokenPath}`);
+}
+
+function readSuppliedToken(flags: Record<string, string | true>): string {
+  const token = (typeof flags['token-file'] === 'string' ? readFileSync(flags['token-file'], 'utf8') : readFileSync(0, 'utf8')).trim();
+  if (!/^as_[A-Za-z0-9_-]{16,}$/.test(token)) throw new InstallError('That is not an AgentShield agent credential. Pass the file "agentshield enroll hermes" wrote.');
+  return token;
+}
+
+/**
+ * `connect hermes`: look at what is here, change what needs changing, then
+ * prove it works. Nothing in Hermes is touched until Hermes has been found,
+ * its version checked and the gateway seen to be answering — in enforce mode
+ * a plugin with no gateway behind it blocks every tool call.
+ */
+async function connectHermes(dir: string, flags: Record<string, string | true>): Promise<void> {
+  const wantMode = typeof flags.mode === 'string' ? flags.mode : undefined;
+  if (wantMode !== undefined && wantMode !== 'enforce' && wantMode !== 'monitor') throw new InstallError('--mode is "enforce" or "monitor".');
+  const supplied = flags['token-stdin'] === true || typeof flags['token-file'] === 'string';
+  const dryRun = flags['dry-run'] === true;
+
+  const hermes = detectHermes({ bin: typeof flags.hermes === 'string' ? flags.hermes : undefined, profile: typeof flags.profile === 'string' ? flags.profile : undefined });
+  const source = pluginSource(packageRoot());
+  const profile = basename(dirname(hermes.home)) === 'profiles' ? basename(hermes.home) : undefined;
+  const agentId = flag(flags, 'agent', profile ?? 'hermes');
+  const url = statedUrl(flags) ?? readUrl(hermes.envPath);
+  const health = await gatewayHealth(url);
+  const hasData = existsSync(join(dir, 'keys', 'permit.key'));
+
+  console.log(`Found Hermes ${hermes.version}`);
+  console.log(`  home:     ${hermes.home}${profile ? `  (profile "${profile}")` : ''}`);
+  console.log(`  plugin:   ${hermes.plugin ? `${hermes.plugin.status}, ${hermes.plugin.source}` : 'not installed'}`);
+  console.log(`  gateway:  ${health.detail}`);
+
+  if (!versionAtLeast(hermes.version, MIN_HERMES)) throw new InstallError(`This plugin needs Hermes ${MIN_HERMES} or later; this is ${hermes.version}. Run "hermes update", then try again. Nothing was changed.`);
+  if (!supplied && !hasData) {
+    throw new InstallError(`There is no gateway data in ${dir}. Start a gateway here first ("agentshield service install"), or, if the gateway runs in another account, run "agentshield enroll hermes" there and pass its credential here with --token-stdin. Nothing was changed.`);
   }
-  console.log(`Gateway side ready for Hermes (tenant "${tenant}", agent "${agentId}").`);
-  for (const d of done) console.log(`  - ${d}`);
-  if (!done.length) console.log('  - nothing to change');
-  console.log(`\n${lines.join('\n')}`);
-  console.log(`\nTo watch without blocking first, add AGENTSHIELD_MODE=monitor to that account's ~/.hermes/.env.`);
-  console.log(`The gateway must be running: agentshield up`);
+
+  const mode = wantMode ?? readMode(hermes.envPath);
+  const plan = [
+    supplied ? 'use the credential supplied on standard input' : `make sure agent "${agentId}" exists on the gateway with a standing grant`,
+    `save the credential to ${tokenPath()} (owner-only)`,
+    pluginCurrent(hermes, source)
+      ? 'leave the plugin as it is (already this version and enabled)'
+      : source.kind === 'git'
+        ? `install the plugin with "hermes plugins install", pinned to commit ${source.sha.slice(0, 12)}`
+        : `copy the plugin into ${join(hermes.home, 'plugins')} and enable it (${source.why})`,
+    `run in ${mode} mode${wantMode ? '' : ' (unchanged)'}`,
+    'send one test call through the gateway',
+  ];
+  console.log('\nPlan:');
+  for (const p of plan) console.log(`  - ${p}`);
+  if (dryRun) return console.log('\nDry run: nothing was changed.');
+  if (!health.ok) {
+    throw new InstallError(`The gateway is not running (${health.detail}). Start it first: "agentshield service install" keeps it running, "agentshield up" runs it in this terminal. Nothing was changed.`);
+  }
+
+  console.log('');
+  let token: string;
+  if (supplied) token = readSuppliedToken(flags);
+  else {
+    const e = enrollHermes(dir, flags, agentId);
+    for (const d of e.done) console.log(`Gateway: ${d}`);
+    token = e.token;
+  }
+  const first = await hookSelfTest(url, token);
+  if (!first.ok) throw new InstallError(`The gateway did not accept the agent's credential: ${first.detail}. Hermes was not changed.`);
+
+  writeToken(token);
+  if (!pluginCurrent(hermes, source)) installPlugin(hermes, source);
+  if (wantMode && writeMode(hermes.envPath, wantMode)) console.log(`Set ${wantMode} mode in ${hermes.envPath}`);
+  if (writeUrl(hermes.envPath, url)) console.log(`Recorded the gateway address ${url} in ${hermes.envPath}`);
+
+  const after = detectHermes({ bin: hermes.command[0], profile: typeof flags.profile === 'string' ? flags.profile : undefined });
+  const last = await hookSelfTest(url, token);
+  if (after.plugin?.status !== 'enabled' || !last.ok) throw new InstallError(`Installed, but the final check failed (plugin: ${after.plugin?.status ?? 'missing'}; test call: ${last.detail}). Run "agentshield doctor".`);
+
+  console.log(`
+Connected. Hermes ${after.version} at ${after.home} now asks AgentShield before every tool call.
+  plugin:  ${after.plugin.status}, ${after.plugin.source}
+  mode:    ${readMode(after.envPath)}${readMode(after.envPath) === 'monitor' ? ' (nothing is blocked; what would be is written to the Hermes log)' : ''}
+  check:   ${last.detail}
+
+A Hermes that is already running picks the plugin up for new tool calls. If it does not, run:
+  ${[...hermes.command, 'gateway', 'restart'].join(' ')}
+Check any time with: agentshield doctor`);
+}
+
+/** `disconnect hermes`: takes the plugin, the credential copy and the mode setting back out of Hermes. */
+function disconnectHermes(flags: Record<string, string | true>): void {
+  const hermes = detectHermes({ bin: typeof flags.hermes === 'string' ? flags.hermes : undefined, profile: typeof flags.profile === 'string' ? flags.profile : undefined });
+  const removed = removePlugin(hermes);
+  const token = tokenState();
+  if (token.exists) rmSync(token.path, { force: true });
+  const mode = writeMode(hermes.envPath, 'enforce');
+  writeUrl(hermes.envPath, undefined);
+  console.log(`Disconnected Hermes at ${hermes.home}.`);
+  console.log(`  - ${removed ? 'removed the plugin' : 'the plugin was not installed'}`);
+  console.log(`  - ${token.exists ? `deleted ${token.path}` : 'there was no saved credential'}`);
+  if (mode) console.log(`  - removed the monitor-mode setting from ${hermes.envPath}`);
+  console.log('\nThe agent identity and its grant are still on the gateway, and so is everything it recorded.');
+  console.log('Tool calls in Hermes are no longer checked.');
+}
+
+interface Check { status: 'ok' | 'fail' | 'warn' | 'note'; name: string; detail: string; fix?: string }
+
+/** `doctor`: every link between an agent and the gateway, checked from this account, with what to run for anything broken. */
+async function doctor(dir: string, flags: Record<string, string | true>): Promise<void> {
+  const checks: Check[] = [];
+  const add = (status: Check['status'], name: string, detail: string, fix?: string): void => void checks.push({ status, name, detail, ...(fix ? { fix } : {}) });
+
+  let hermes: HermesInfo | null = null;
+  let hermesMissing = '';
+  try {
+    hermes = detectHermes({ bin: typeof flags.hermes === 'string' ? flags.hermes : undefined, profile: typeof flags.profile === 'string' ? flags.profile : undefined });
+  } catch (err) {
+    hermesMissing = (err as Error).message;
+  }
+  const url = statedUrl(flags) ?? (hermes ? readUrl(hermes.envPath) : gatewayUrl(flags));
+
+  add('ok', 'AgentShield', `${versionLine()} on Node ${process.versions.node}`);
+  const hasData = existsSync(join(dir, 'keys', 'permit.key'));
+  add('note', 'Gateway data', hasData ? dir : `none in ${dir} (expected if the gateway runs in another account)`);
+  const health = await gatewayHealth(url);
+  add(health.ok ? 'ok' : 'fail', 'Gateway', health.detail, health.ok ? undefined : 'agentshield service install');
+  const svc = serviceState();
+  if (hasData && svc.supported) {
+    if (svc.installed && svc.running) add('ok', 'Service', `${svc.detail} is running`);
+    else if (svc.installed) add('fail', 'Service', `${svc.detail} is installed but not running; see ${join(dir, 'gateway.log')}`, 'agentshield service install');
+    else add(health.ok ? 'note' : 'warn', 'Service', 'not installed; the gateway stops when its terminal closes or the machine restarts', 'agentshield service install');
+  }
+
+  if (hasData && existsSync(join(dir, 'agents'))) {
+    const shield = open(dir);
+    try {
+      for (const file of readdirSync(join(dir, 'agents')).filter((f) => f.endsWith('.token'))) {
+        const id = file.slice(0, -'.token'.length);
+        const principal = shield.authenticate(readFileSync(join(dir, 'agents', file), 'utf8').trim());
+        if (!principal) { add('fail', `Agent "${id}"`, 'its saved credential is no longer valid', 'agentshield connect hermes --rotate'); continue; }
+        const grant = shield.grants.list(principal.tenant_id, id).filter((g) => g.task_id === '*' && shield.grants.isLive(g)).sort((a, b) => b.expires_at - a.expires_at)[0];
+        if (!grant) { add('fail', `Agent "${id}"`, 'has no live grant, so every tool call is blocked', 'agentshield connect hermes'); continue; }
+        const daysLeft = Math.ceil((grant.expires_at - shield.clock.now()) / 86_400_000);
+        add(daysLeft < 14 ? 'warn' : 'ok', `Agent "${id}"`, `grant runs for another ${daysLeft} days`, daysLeft < 14 ? 'agentshield connect hermes   (renews it)' : undefined);
+      }
+    } finally {
+      shield.close();
+    }
+  }
+
+  if (!hermes) add('note', 'Hermes', hermesMissing);
+  else {
+    add(versionAtLeast(hermes.version, MIN_HERMES) ? 'ok' : 'fail', 'Hermes', `${hermes.version} at ${hermes.home}`, versionAtLeast(hermes.version, MIN_HERMES) ? undefined : 'hermes update');
+    if (!hermes.plugin) add('note', 'Hermes plugin', 'not installed; this Hermes is not protected', 'agentshield connect hermes');
+    else {
+      const source = pluginSource(packageRoot());
+      add(hermes.plugin.status === 'enabled' ? 'ok' : 'fail', 'Hermes plugin', `${hermes.plugin.status}, ${hermes.plugin.source}${hermes.plugin.status === 'enabled' ? '' : ' — tool calls are NOT being checked'}`, hermes.plugin.status === 'enabled' ? undefined : 'agentshield connect hermes');
+      if (hermes.plugin.status === 'enabled' && source.kind === 'git' && !pluginCurrent(hermes, source)) add('warn', 'Plugin version', 'differs from this AgentShield checkout', 'agentshield connect hermes');
+      const token = tokenState();
+      if (!token.exists) add('fail', 'Credential', `${token.path} is missing, so the plugin blocks every tool call`, 'agentshield connect hermes');
+      else {
+        add(token.ownerOnly ? 'ok' : 'fail', 'Credential', token.ownerOnly ? `${token.path} (owner-only)` : `${token.path} is readable by other accounts`, token.ownerOnly ? undefined : `chmod 600 ${token.path}`);
+        const test = health.ok ? await hookSelfTest(url, readFileSync(token.path, 'utf8').trim()) : { ok: false, detail: 'skipped: the gateway is not answering' };
+        add(test.ok ? 'ok' : 'fail', 'Test call', test.detail, test.ok ? undefined : 'agentshield connect hermes');
+      }
+      const mode = readMode(hermes.envPath);
+      add(mode === 'monitor' ? 'warn' : 'ok', 'Mode', mode === 'monitor' ? 'monitor: nothing is blocked' : 'enforce', mode === 'monitor' ? 'agentshield connect hermes --mode enforce' : undefined);
+    }
+  }
+
+  const failed = checks.filter((c) => c.status === 'fail').length;
+  if (flags.json === true) process.stdout.write(`${JSON.stringify({ ok: failed === 0, checks }, null, 2)}\n`);
+  else {
+    const width = Math.max(...checks.map((c) => c.name.length));
+    for (const c of checks) {
+      console.log(`${c.status === 'fail' ? 'FAIL' : c.status.padEnd(4)}  ${c.name.padEnd(width)}  ${c.detail}`);
+      if (c.fix) console.log(`      ${' '.repeat(width)}  fix: ${c.fix}`);
+    }
+    console.log(failed ? `\n${failed} problem${failed === 1 ? '' : 's'} found.` : '\nNo problems found.');
+  }
+  if (failed) process.exitCode = 1;
+}
+
+/** `service install|uninstall|status`: keeps the gateway running across logins and restarts. */
+async function service(action: string | undefined, dir: string, flags: Record<string, string | true>): Promise<void> {
+  if (action === 'status') {
+    const s = serviceState();
+    const health = await gatewayHealth(gatewayUrl(flags));
+    console.log(`${s.detail}: ${!s.supported ? 'not supported here' : s.installed ? (s.running ? 'installed and running' : 'installed, not running') : 'not installed'}`);
+    if (s.installed) console.log(`  definition: ${s.path}\n  log:        ${join(dir, 'gateway.log')}`);
+    console.log(`  gateway:    ${health.detail}`);
+    return;
+  }
+  if (action === 'uninstall') {
+    console.log(uninstallService() ? 'Stopped the gateway and removed its service definition. Your data was not touched.' : 'No service was installed.');
+    return;
+  }
+  if (action !== 'install') throw new Error('Usage: agentshield service install|uninstall|status [--port 8787]');
+  const port = Number(flag(flags, 'port', '8787'));
+  const host = flag(flags, 'host', '127.0.0.1');
+  if (!existsSync(join(dir, 'keys', 'permit.key'))) init(resolve(dir), tenantOf(dir, flags), '');
+  const s = installService({ root: packageRoot(), dir: resolve(dir), host, port });
+  const url = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`;
+  let health = await gatewayHealth(url);
+  for (let i = 0; i < 30 && !health.ok; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    health = await gatewayHealth(url);
+  }
+  if (!health.ok) throw new Error(`The service was installed (${s.path}) but the gateway is not answering at ${url}. See ${join(resolve(dir), 'gateway.log')}.`);
+  console.log(`Gateway running as ${s.detail}; it starts at each login and is restarted if it crashes.
+  address:    ${url}
+  definition: ${s.path}
+  data:       ${resolve(dir)}
+  log:        ${join(resolve(dir), 'gateway.log')}`);
 }
 
 function policySign(file: string | undefined, flags: Record<string, string | true>): void {
@@ -296,30 +506,51 @@ async function mcpStdio(flags: Record<string, string | true>): Promise<void> {
 
 const HELP = `agentshield <command>
 
-  up [--port 8787]                                  Create the data directory if needed, then run the gateway
-  connect hermes [--user ACCOUNT] [--agent ID] [--days 90] [--rotate]
-                                                    Prepare the gateway for a Hermes agent and print the install line
+Set up
+  service install|uninstall|status [--port 8787]    Run the gateway in the background, now and after every login
+  connect hermes [--profile NAME] [--mode enforce|monitor] [--agent ID] [--days 90] [--rotate] [--dry-run]
+                                                    Find Hermes, install the plugin through Hermes, and test it
+  connect hermes --token-stdin | --token-file FILE  The same, when the gateway runs in another account
+  enroll hermes [--agent ID] [--days 90] [--rotate] Gateway side only: create the agent and save its credential
+  disconnect hermes [--profile NAME]                Remove the plugin and the saved credential from Hermes
+  doctor [--json]                                   Check every link from the agent to the gateway
+
+Run
+  up [--port 8787]                                  Create the data directory if needed, then run the gateway here
   init [--tenant default]                           Create keys, database, default policy and first credentials
   serve [--port 8787] [--host 127.0.0.1] [--socket PATH] [--no-two-person]
   policy sign <bundle.json> [--key KEYFILE] [--out FILE]
   audit verify [--tenant default]
   mcp-stdio --tool TOOL_ID --task TASK_ID [--url URL]   (credential in AGENTSHIELD_TOKEN)
   demo                                              Run the twelve reference workflows in memory
+  --version
 
 Every command takes --dir DIR. The default is $AGENTSHIELD_HOME, or ~/.agentshield.
+The gateway address defaults to http://127.0.0.1:8787; change it with --url or $AGENTSHIELD_URL.
 `;
 
 async function main(): Promise<void> {
   const { positional, flags } = parseArgs(process.argv.slice(2));
   const dir = flag(flags, 'dir', process.env.AGENTSHIELD_HOME ?? join(homedir(), '.agentshield'));
   const tenant = tenantOf(dir, flags);
+  if (flags.version === true && !positional.length) return console.log(versionLine());
   switch (positional[0]) {
     case 'up':
       if (!existsSync(join(dir, 'keys', 'permit.key'))) init(dir, tenant);
       return serve(dir, flags);
     case 'connect':
       if (positional[1] === 'hermes') return connectHermes(dir, flags);
-      throw new Error('Usage: agentshield connect hermes [--user ACCOUNT] [--agent ID] [--days 90] [--rotate]');
+      throw new Error('Usage: agentshield connect hermes   (Hermes is the runtime supported so far; see "agentshield --help")');
+    case 'enroll':
+      if (positional[1] === 'hermes') return enrollCommand(dir, flags);
+      throw new Error('Usage: agentshield enroll hermes [--agent ID] [--days 90] [--rotate]');
+    case 'disconnect':
+      if (positional[1] === 'hermes') return disconnectHermes(flags);
+      throw new Error('Usage: agentshield disconnect hermes [--profile NAME]');
+    case 'doctor':
+      return doctor(dir, flags);
+    case 'service':
+      return service(positional[1], dir, flags);
     case 'init':
       return init(dir, tenant);
     case 'serve':

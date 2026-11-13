@@ -1,0 +1,27 @@
+{
+  "tool_id": "crm.v1",
+  "kind": "http",
+  "owner": "sales-platform",
+  "description": "Read access to the internal CRM.",
+  "destination_id": "crm.internal",
+  "endpoint": { "base_url": "https://crm.internal.example/api" },
+  "credential_ref": "env:CRM_API_TOKEN",
+  "operations": {
+    "crm.read": {
+      "description": "Fetch selected fields of one customer record.",
+      "class": "data_read",
+      "effect": "read",
+      "resource_arg": "customer_id",
+      "http": { "method": "GET", "path": "/customers/{customer_id}" },
+      "input_schema": {
+        "type": "object",
+        "required": ["customer_id"],
+        "additionalProperties": false,
+        "properties": {
+          "customer_id": { "type": "string", "pattern": "^customer_[0-9]+$" },
+          "fields": { "type": "string", "maxLength": 200 }
+        }
+      }
+    }
+  }
+}

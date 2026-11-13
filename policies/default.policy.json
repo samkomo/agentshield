@@ -1,0 +1,105 @@
+{
+  "policy_id": "agentshield-default",
+  "version": 1,
+  "description": "Deny by default. Secrets never leave; confidential data and consequential writes need a human.",
+  "label_order": [
+    "PUBLIC",
+    "INTERNAL",
+    "PERSONAL",
+    "FINANCIAL",
+    "CONFIDENTIAL",
+    "RESTRICTED",
+    "SECRET",
+    "CRITICAL"
+  ],
+  "detection": {
+    "min_confidence": 0.6,
+    "finding_labels": {
+      "SECRET": "SECRET",
+      "PII": "PERSONAL"
+    }
+  },
+  "data_flow": {
+    "secrets": "redact",
+    "pii": "redact",
+    "external_approval_label": "CONFIDENTIAL",
+    "write_approval_label": "PERSONAL",
+    "propagate_task_labels_to": [
+      "egress",
+      "model"
+    ],
+    "destination_required_for": [
+      "egress",
+      "model",
+      "payment"
+    ]
+  },
+  "operation_classes": {
+    "data_read": {
+      "approval": "risk",
+      "redaction": "allow"
+    },
+    "data_write": {
+      "approval": "risk",
+      "redaction": "forbid"
+    },
+    "egress": {
+      "approval": "risk",
+      "redaction": "allow"
+    },
+    "model": {
+      "approval": "risk",
+      "redaction": "allow"
+    },
+    "payment": {
+      "approval": "risk",
+      "redaction": "forbid",
+      "requires_amount": true
+    },
+    "admin": {
+      "approval": "always",
+      "redaction": "forbid"
+    },
+    "physical": {
+      "approval": "always",
+      "redaction": "forbid"
+    },
+    "audit_admin": {
+      "approval": "always",
+      "redaction": "forbid",
+      "deny": true
+    }
+  },
+  "default_class": {
+    "approval": "always",
+    "redaction": "forbid"
+  },
+  "injection": {
+    "taint_threshold": 0.6,
+    "tainted_write": "require_approval"
+  },
+  "risk": {
+    "weights": {
+      "sensitivity": 25,
+      "impact": 25,
+      "destination": 20,
+      "behavior": 15,
+      "credential": 15
+    },
+    "thresholds": {
+      "moderate": 25,
+      "high": 50,
+      "critical": 75
+    },
+    "rate_baseline_per_minute": 60
+  },
+  "limits": {
+    "max_action_ttl_seconds": 900,
+    "permit_ttl_seconds": 60,
+    "approval_ttl_seconds": 900,
+    "max_arguments_bytes": 262144,
+    "max_result_bytes": 1048576,
+    "max_delegation_depth": 3,
+    "execution_timeout_ms": 30000
+  }
+}

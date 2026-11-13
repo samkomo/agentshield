@@ -1,0 +1,19 @@
+{
+  "name": "agentshield",
+  "version": "0.1.0",
+  "description": "Runtime action-security gateway for autonomous AI agents: deterministic authorization, local DLP, exact-action approval and signed decision evidence.",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "bin": { "agentshield": "bin/agentshield.mjs" },
+  "scripts": {
+    "start": "node src/cli.ts serve",
+    "demo": "node examples/demo.ts",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

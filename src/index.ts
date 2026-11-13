@@ -1,0 +1,11 @@
+export { Shield, type ShieldOptions } from './gateway/shield.ts';
+export { createHandler, startServer, type ListenOptions } from './gateway/server.ts';
+export { handleMcpMessage } from './mcp/proxy.ts';
+export { Store } from './store/db.ts';
+export { ephemeralKeys, generateKeyDir, loadKeyDir, signingKeyFromPem, type KeySet } from './core/crypto.ts';
+export { canonicalize, digest, parseStrict, type Json, type JsonObject } from './core/json.ts';
+export { ShieldError, systemClock, type Clock } from './core/util.ts';
+export { DEFAULT_POLICY, signBundle, validateBundle, type PolicyBundle, type SignedBundle } from './policy/bundle.ts';
+export { scanJson, scanText, type Detector } from './detect/scanner.ts';
+export { detectInjection } from './detect/injection.ts';
+export type * from './core/types.ts';
